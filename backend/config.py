@@ -1,0 +1,70 @@
+# backend/config.py
+"""对焦任务参数：GUI 与后端之间的类型化契约。"""
+
+from dataclasses import dataclass, field
+from typing import Optional,Callable
+
+# 预览回调的参数约定：
+#
+# callback(
+#     image,       # NumPy/OpenCV 图像
+#     phase,       # calibrate / coarse / fine
+#     sequence,    # 当前阶段中的帧序号
+#     score,       # 当前帧清晰度得分
+# )
+PreviewCallback = Callable[
+    [object, str, int, float],
+    None,
+]
+
+@dataclass
+class FocusConfig:
+    """字段与 verify_ncc_full 的 parser 参数一一对应，默认值与 parser 一致。"""
+
+    action: str = "search"                     # search / calibrate
+    mode: str = "real"                         # real / sim
+    strategy: str = "ncc"
+    template: str = "data/template.json"
+    plc_host: str = "192.168.100.88"
+    plc_port: int = 502
+    camera_index: int = 0
+
+    search_start_um: int = 9500
+    search_span_um: int = 2000
+    coarse_step_um: int = 100
+    fine_step_um: int = 5
+    fine_half_steps: int = 5
+    ncc_min_score: float = 0.5
+
+    calibrate_step_um: int = 5
+    calibrate_start_um: Optional[int] = None
+    calibrate_span_um: Optional[int] = None
+    calibrate_images: Optional[str] = None
+    calibrate_downsample: Optional[str] = None
+    calibrate_factor: Optional[int] = None
+
+    exposure_us: int = 12000
+    coarse_exposure_us: int = 0
+    gain_db: float = 0.0
+    coarse_binning: int = 4
+    coarse_downsample: str = "decimation"
+    fine_binning: int = 1
+    detect_model: str = r"F:\项目\自动对焦\code\detect\runs\detect\autofocus\weights\best.pt"
+    detect_conf: float = 0.5
+    roi_fallback_size: int = 700
+
+    save_dir: Optional[str] = None
+    save_images: Optional[str] = None
+    save_all: bool = False
+    flyscan_timeout: float = 600.0
+    frame_wait_timeout: float = 60.0
+    final_frame_timeout: float = 3.0
+    yes: bool = False
+
+    cancel_event: Optional[object] = None      # 运行期注入：停止开关
+    detect_model_obj: Optional[object] = None  # 运行期注入：已加载的 YOLO
+    # CLI 或无界面运行时保持 None，不产生任何预览开销。
+    # image, phase, sequence, score
+    preview_callback: Optional[PreviewCallback] = None
+    # 0.1 秒代表最多每秒发送 10 张预览图。
+    preview_interval_s: float = 0.1

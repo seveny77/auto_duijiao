@@ -1,0 +1,2 @@
+SENSOR_W = 4096   # MV-CH120-60UM 全幅宽度
+SENSOR_H = 3000   # 全幅高度
