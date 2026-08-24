@@ -120,13 +120,13 @@ class SearchContext:
         return positions, scores, best_frame
 
     def capture_frame(self):
-        """拍一张定拍帧。DL 用。"""
-        self._cam.set_trigger_mode("software")
-        self._cam.start_grabbing()
-        self._cam.trigger_software()
-        img = self._cam.get_frame(1000)
-        self._cam.stop_grabbing()
-        return img
+        """拍一张定拍帧，供 DL 策略使用。"""
+
+        # 具体的软件触发、取帧和停止取流流程，
+        # 统一交给相机适配器管理。
+        return self._cam.capture_frame(
+            timeout_ms=1000
+        )
 
 
 class FocusStrategy(ABC):

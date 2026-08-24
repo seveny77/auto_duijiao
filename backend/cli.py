@@ -1,7 +1,11 @@
 import argparse
 import sys
+import logging
 from backend.config import FocusConfig
 from backend.pipeline import run_search,run_calibrate
+from logging_config import (
+    configure_console_logging,
+)
 # ============================================================
 # CLI / 主流程
 # ============================================================
@@ -45,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="YOLO 模型路径（缺失则降级居中 ROI）",
     )
     p.add_argument("--detect-conf", type=float, default=0.5)
-    p.add_argument("--roi-fallback-size", type=int, default=700)
+    p.add_argument("--roi-fallback-size", type=int, default=1000)
     p.add_argument("--save-dir", default=None, help="保存粗扫/精扫/定拍图")
     p.add_argument("--save-images", default=None,
                    help="把本次扫描的全部帧存为 jpg 到该目录（文件名含序号和实际位置µm）")
@@ -65,9 +69,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(
+            encoding="utf-8"
+        )
+
+    configure_console_logging(
+        level=logging.INFO
+    )
+
     args = build_parser().parse_args(argv)
     cfg = FocusConfig(**vars(args))        # ★ parser Namespace → dataclass
     if cfg.action == "calibrate":
-        return run_calibrate(cfg)
-    return run_search(cfg)
+        result = run_calibrate(cfg)
+    else:
+        result = run_search(cfg)
+
+    # run_search / run_calibrate 返回类型化结果对象，
+    # 命令行入口只把其中的整数返回码交给 SystemExit。
+    # 不能直接返回结果对象，否则 Python 会打印整个对象
+    # （包括图像数组）并以退出码 1 结束。
+    return int(result.rc)

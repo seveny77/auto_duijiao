@@ -16,6 +16,24 @@ class ParamPanel(QWidget):
         layout.addWidget(self._build_search_group())
         layout.addStretch()
 
+        # 所有参数控件创建完成后，再连接动作切换信号。
+        self.action_combo.currentTextChanged.connect(
+            self._update_action_widgets
+        )
+
+        # 根据默认动作初始化控件状态。
+        self._update_action_widgets(
+            self.action_combo.currentText()
+        )
+
+        self.mode_combo.currentTextChanged.connect(
+            self._update_mode_widgets
+        )
+
+        self._update_mode_widgets(
+            self.mode_combo.currentText()
+        )
+
     # ---------- PLC 参数 ----------
     def _build_plc_group(self) -> QGroupBox:
         group = QGroupBox("PLC 参数")
@@ -45,11 +63,17 @@ class ParamPanel(QWidget):
         self.gain_spin.setDecimals(1)
         self.gain_spin.setValue(0.0)
         self.gain_spin.setSuffix(" dB")
-        self.camType_combo = QComboBox()
-        self.camType_combo.addItems(["软件触发", "硬件触发", "连续触发"])
+        self.trigger_mode_label = QLabel("自动切换")
+        self.trigger_mode_label.setToolTip(
+            "实时预览使用连续取流；"
+            "标定、粗扫、精扫和定点拍照使用硬件触发"
+        )
         self.decimation_combo = QComboBox()
         self.decimation_combo.addItems(["1x1", "2x2", "4x4"])
-        form.addRow("触发模式:", self.camType_combo)
+        form.addRow(
+            "触发模式:",
+            self.trigger_mode_label,
+        )
         form.addRow("曝光时间:", self.exposure_spin)
         form.addRow("增益:", self.gain_spin)
         form.addRow("下采样(dec):", self.decimation_combo)
@@ -72,7 +96,7 @@ class ParamPanel(QWidget):
 
     # ---------- 搜索参数 ----------
     def _build_search_group(self) -> QGroupBox:
-        group = QGroupBox("搜索参数")
+        group = QGroupBox("扫描参数")
         form = QFormLayout(group)
         # 搜索起点
         self.search_start_spin = QSpinBox()
@@ -123,12 +147,12 @@ class ParamPanel(QWidget):
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.stop_btn)
 
-        form.addRow("搜索起点(um):", self.search_start_spin)
-        form.addRow("搜索跨度(um):", self.search_span_spin)
+        form.addRow("扫描起点(um):", self.search_start_spin)
+        form.addRow("扫描跨度(um):", self.search_span_spin)
         form.addRow("粗扫步长:", self.coarse_step_spin)
         form.addRow("精扫步距(um):", self.fine_step_spin)
         form.addRow("精扫半宽(步):", self.fine_half_spin)
-        form.addRow("标定模板文件:", self.template_edit)
+        form.addRow("模板文件:", self.template_edit)
         form.addRow("标定步距(um):", self.calibrate_step_spin)
         form.addRow("标定降采样倍率:", self.calibrate_ds_combo)
         form.addRow("保存图片目录:", self.save_edit)
@@ -137,14 +161,60 @@ class ParamPanel(QWidget):
         return group
         # ---------- 运行时要锁定的控件 ----------
 
+    def _update_action_widgets(self, action_text: str):
+        """根据搜索/标定动作切换相关参数的可用状态。"""
+
+        is_search = action_text == "搜索对焦"
+
+        # 搜索对焦专用参数。
+        search_widgets = (
+            self.coarse_step_spin,
+            self.fine_step_spin,
+            self.fine_half_spin,
+            self.template_load_btn,
+        )
+
+        # 图像标定专用参数。
+        calibrate_widgets = (
+            self.calibrate_step_spin,
+            self.calibrate_ds_combo,
+        )
+
+        for widget in search_widgets:
+            widget.setEnabled(is_search)
+
+        for widget in calibrate_widgets:
+            widget.setEnabled(not is_search)
+
+    def _update_mode_widgets(self, mode_text: str):
+        """根据真实/仿真模式更新相关控件状态。"""
+
+        is_real = mode_text == "真实"
+
+        # 仿真模式没有真实机械运动，不需要飞拍确认。
+        self.skip_confirm_check.setEnabled(
+            is_real
+        )
+
     def lock_widgets(self) -> list:
         return [
-            self.action_combo, self.mode_combo, self.skip_confirm_check,
-            self.exposure_spin, self.gain_spin, self.decimation_combo,
-            self.camType_combo,
-            self.plc_ip_edit, self.plc_port_spin, self.plc_connect_btn,
-            self.search_start_spin, self.search_span_spin,
-            self.fine_step_spin, self.fine_half_spin, self.coarse_step_spin,
-            self.save_edit, self.template_edit,
-            self.template_load_btn, self.calibrate_step_spin, self.calibrate_ds_combo,
+            self.action_combo,
+            self.mode_combo,
+            self.skip_confirm_check,
+            self.exposure_spin,
+            self.gain_spin,
+            self.decimation_combo,
+            self.plc_ip_edit,
+            self.plc_port_spin,
+            self.plc_connect_btn,
+            self.search_start_spin,
+            self.search_span_spin,
+            self.fine_step_spin,
+            self.fine_half_spin,
+            self.coarse_step_spin,
+            self.save_edit,
+            self.template_edit,
+            self.template_load_btn,
+            self.calibrate_step_spin,
+            self.calibrate_ds_combo,
         ]

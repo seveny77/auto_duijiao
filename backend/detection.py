@@ -1,8 +1,14 @@
-from backend.camera_utils import (
-     box_to_roi, fallback_roi
-)
+import logging
 import os
 from typing import Optional, Tuple
+
+from backend.camera_utils import (
+    box_to_roi,
+    fallback_roi,
+)
+
+
+logger = logging.getLogger(__name__)
 
 _detect_model_cache = {}
 _torch_threads_limited = False
@@ -25,6 +31,7 @@ def detect_roi(
     binning: int,
     fallback_size: int,
     model=None,
+    sensor_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[Tuple[int, int, int, int], str, Optional[Tuple[float, float, float, float]]]:
     """YOLO 检测定 ROI；失败或模型缺失 → 降级居中固定 ROI。
 
@@ -36,9 +43,23 @@ def detect_roi(
             boxes = results[0].boxes
             if boxes is not None and len(boxes) > 0:
                 x1, y1, x2, y2 = boxes.xyxy[0].tolist()
-                return box_to_roi(x1, y1, x2, y2, binning), "detect", (x1, y1, x2, y2)
+                return (
+                    box_to_roi(
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        binning,
+                        sensor_size=sensor_size,
+                    ),
+                    "detect",
+                    (x1, y1, x2, y2),
+                )
         except Exception as e:
-            print(f"[警告] 检测失败(外部模型): {e}")
+            logger.warning(
+                "检测失败（外部模型）: %s",
+                e,
+            )
     elif model_path and os.path.exists(model_path):
         try:
             from ultralytics import YOLO
@@ -48,7 +69,28 @@ def detect_roi(
             boxes = results[0].boxes
             if boxes is not None and len(boxes) > 0:
                 x1, y1, x2, y2 = boxes.xyxy[0].tolist()
-                return box_to_roi(x1, y1, x2, y2, binning), "detect", (x1, y1, x2, y2)
+                return (
+                    box_to_roi(
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        binning,
+                        sensor_size=sensor_size,
+                    ),
+                    "detect",
+                    (x1, y1, x2, y2),
+                )
         except Exception as e:
-            print(f"[警告] 检测失败: {e}")
-    return fallback_roi(fallback_size), "fallback", None
+            logger.warning(
+                "检测失败: %s",
+                e,
+            )
+    return (
+        fallback_roi(
+            fallback_size,
+            sensor_size=sensor_size,
+        ),
+        "fallback",
+        None,
+    )

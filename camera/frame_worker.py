@@ -1,6 +1,10 @@
-# frame_worker.py（新文件）
-import threading
+# frame_worker.py
+import logging
 import queue
+import threading
+
+
+logger = logging.getLogger(__name__)
 
 class FrameWorker:
     def __init__(self, camera, process_fn, max_queue=16):
@@ -44,7 +48,15 @@ class FrameWorker:
             except queue.Empty:
                 continue
             try:
-                self._process(img, self._count[0])
-            except Exception as e:
-                print(f"FrameWorker error: {e}")
+                self._process(
+                    img,
+                    self._count[0],
+                )
+
+            except Exception:
+                logger.exception(
+                    "FrameWorker 第 %d 帧处理失败",
+                    self._count[0],
+                )
+
             self._count[0] += 1

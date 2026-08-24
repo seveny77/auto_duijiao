@@ -5,7 +5,6 @@ import argparse
 import sys
 import os
 import time
-from backend.constants import SENSOR_W, SENSOR_H
 
 def fine_scan_params(predicted_peak_um, half_points=10, step_um=5):
     """计算精扫飞拍参数。
@@ -143,7 +142,11 @@ def run_dl_hybrid(args):
         t0 = time.perf_counter()
         cam.set_exposure(args.exposure_us)
         cam.set_gain(args.gain_db)
-        set_coarse_frame(cam, "decimation", args.decimation)
+        sensor_size = set_coarse_frame(
+            cam,
+            "decimation",
+            args.decimation,
+        )
         img = cam.capture_frame()
         ct["stage1_capture_ms"] = (time.perf_counter() - t0) * 1000
 
@@ -158,8 +161,13 @@ def run_dl_hybrid(args):
         # 阶段③：YOLO 定 ROI
         t0 = time.perf_counter()
         roi, roi_src, detect_box = detect_roi(
-            img, args.detect_model, args.detect_conf, args.decimation,
-            args.roi_fallback_size, model=_detect_model,
+            img,
+            args.detect_model,
+            args.detect_conf,
+            args.decimation,
+            args.roi_fallback_size,
+            model=_detect_model,
+            sensor_size=sensor_size,
         )
         ct["stage3_roi_ms"] = (time.perf_counter() - t0) * 1000
         print(f"ROI: {roi}（来源: {roi_src}）")

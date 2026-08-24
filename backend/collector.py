@@ -1,9 +1,12 @@
+import logging
+import os
 import queue
 import threading
-import os
-import cv2
-from typing import Dict, List, Optional, Tuple
 import time
+from typing import Dict, Optional
+
+import cv2
+logger = logging.getLogger(__name__)
 
 def save_jpg(image, path: str):
     cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tofile(path)
@@ -18,7 +21,13 @@ def save_phase_images(collector, count: int, positions: list, prefix: str, out_d
             continue
         save_jpg(img, os.path.join(out_dir, f"{prefix}_{i:04d}_{positions[i]:.0f}um.jpg"))
         saved += 1
-    print(f"[保存] {prefix}: {saved}/{count} 张 -> {out_dir}")
+    logger.info(
+        "[保存] %s: %d/%d 张 -> %s",
+        prefix,
+        saved,
+        count,
+        out_dir,
+    )
 
 class PhaseCollector:
     def __init__(self,
@@ -32,16 +41,24 @@ class PhaseCollector:
                  keep_images: bool = True,
                  preview_callback=None,
                  preview_interval_s: float = 0.1,
-                 phase_name: str = "",):
+                 phase_name: str = "",
+                 evaluation_roi=None,):
         self._cam = camera
         self._eval = evaluator
+        self._evaluation_roi = evaluation_roi
         self._save_dir = save_dir
         self._start_index = start_index #文件名起始编号，避免不同阶段重名
         self._save_all = save_all
         self._queue = queue.Queue(maxsize=max_queue) # 线程安全的 FIFO 队列
         self._stop = threading.Event()
-        self._enqueued = 0 # 已入队计数，同时下一帧的序号
-        self._processed = 0 #已完成评价的张数
+        # 相机回调实际收到的帧数。
+        self._received = 0
+        # 成功放入评价队列的帧数。
+        self._enqueued = 0
+        # 因评价队列已满而丢弃的帧数。
+        self._dropped = 0
+        # 已经完成清晰度评价的帧数。
+        self._processed = 0
         self._scores: Dict[int, float] = {} # 分数表 {帧序号: 清晰度分数}
         self._images: Dict[int, object] = {} # 图像表 {帧序号: 图像数组}
         self._error = None
@@ -77,14 +94,38 @@ class PhaseCollector:
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
 
-    def stop(self):
+    def stop(self, timeout: float = 5.0) -> bool:
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
+
         try:
             self._cam.stop_grabbing()
         except Exception as e:
-            print(f"[警告] 停止取流失败: {e}")
+            logger.warning(
+                "停止取流失败: %s",
+                e,
+            )
+        # ③ 等待图像评价 Worker 退出。
+        thread = self._thread
+        if thread is not None:
+            # 防止 Worker 线程错误地等待自己，
+            # 否则会形成死锁。
+            if thread is threading.current_thread():
+                logger.error(
+                    "PhaseCollector Worker 不能等待自身退出"
+                )
+                return False
+            thread.join(timeout=timeout)
+            # join(timeout) 超时返回时，线程可能仍然存活，
+            # 因此必须显式检查 is_alive()。
+            if thread.is_alive():
+                logger.error(
+                    "PhaseCollector Worker "
+                    "在 %.1fs 内没有退出",
+                    timeout,
+                )
+                return False
+        self._thread = None
+        return True
 
     @property
     def processed(self) -> int:
@@ -96,17 +137,58 @@ class PhaseCollector:
         with self._lock:
             return self._error
 
+    def stats(self) -> dict:
+        """返回当前采集和评价统计的只读快照。"""
+
+        with self._lock:
+            return {
+                "received": self._received,
+                "enqueued": self._enqueued,
+                "dropped": self._dropped,
+                "processed": self._processed,
+            }
+
     def wait(self, count: int, timeout: float) -> bool:
+        """等待指定数量的帧完成评价。
+
+        返回 False 的原因可能是：
+            用户取消；
+            图像评价失败；
+            队列满导致丢帧；
+            等待超时。
+
+        调用方可通过 error 和 stats() 判断具体原因。
+        """
+
         deadline = time.monotonic() + timeout
+
         while time.monotonic() < deadline:
             with self._lock:
-                if self._cancel is not None and self._cancel.is_set():
-                    return False  # 被取消：按"超时"返回 False
+                # 用户主动取消。
+                if (
+                        self._cancel is not None
+                        and self._cancel.is_set()
+                ):
+                    return False
+
+                # 清晰度评价过程中发生异常。
                 if self._error is not None:
                     return False
+
+                # 只要已经因为队列满丢过帧，
+                # 就不可能得到一组完整、连续的扫描结果。
+                #
+                # 无需继续等满整个 wait_timeout，
+                # 直接返回，让 Pipeline 输出明确错误。
+                if self._dropped > 0:
+                    return False
+
+                # 已经处理到 PLC 返回的目标数量。
                 if self._processed >= count:
                     return True
+
             time.sleep(0.02)
+
         return False
 
     def queue_empty(self) -> bool:
@@ -121,12 +203,38 @@ class PhaseCollector:
             return self._images.get(seq)
     #相机回调线程
     def _on_frame(self, img):
-        seq = self._enqueued
-        self._enqueued += 1
+        """相机 SDK 回调：把图像快速放入评价队列。"""
+
+        # stop() 设置停止标记后，不再接收新的图片。
+        if self._stop.is_set():
+            return
+
+        # 分配相机回调序号，并统计实际收到的帧数。
+        #
+        # 使用锁是为了确保即使 SDK 从不同线程调用回调，
+        # 每一帧仍能获得唯一且连续的回调序号。
+        with self._lock:
+            seq = self._received
+            self._received += 1
+
         try:
-            self._queue.put_nowait((img, seq)) # put_nowait 非阻塞入队
+            # 相机 SDK 回调线程中不能阻塞，
+            # 因此继续使用非阻塞入队。
+            self._queue.put_nowait((img, seq))
+
         except queue.Full:
-            pass
+            # 队列已满，记录丢帧数量。
+            #
+            # 这里只增加计数，不输出日志，
+            # 避免高帧率下大量打印阻塞相机回调。
+            with self._lock:
+                self._dropped += 1
+
+        else:
+            # put_nowait() 没有抛出 queue.Full，
+            # 说明图片已经成功进入评价队列。
+            with self._lock:
+                self._enqueued += 1
 
     def _emit_preview(
             self,
@@ -174,7 +282,10 @@ class PhaseCollector:
             #
             # 预览失败不能让标定、粗扫或精扫失败，
             # 所以这里只记录警告，不设置 self._error。
-            print(f"[警告] 过程预览发送失败: {e}")
+            logger.warning(
+                "过程预览发送失败: %s",
+                e,
+            )
 
     def _worker(self):
         while not self._stop.is_set() or not self._queue.empty():
@@ -186,7 +297,10 @@ class PhaseCollector:
             except queue.Empty:
                 continue
             try:
-                score = self._eval.evaluate_image(img, None)  # 全图评价
+                score = self._eval.evaluate_image(
+                    img,
+                    self._evaluation_roi,
+                )
                 with self._lock:
                     self._scores[seq] = score
                     if self._keep_images:

@@ -51,7 +51,7 @@ class FocusConfig:
     fine_binning: int = 1
     detect_model: str = r"F:\项目\自动对焦\code\detect\runs\detect\autofocus\weights\best.pt"
     detect_conf: float = 0.5
-    roi_fallback_size: int = 700
+    roi_fallback_size: int = 1500
 
     save_dir: Optional[str] = None
     save_images: Optional[str] = None

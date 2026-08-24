@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""全图采集：Z 轴等步长飞拍，逐帧保存 JPG（供离线标定使用）
-默认参数：行程 10000~11000μm、步距 5μm → 200 帧全图（2600×2160，不降采样、不开窗）。
+"""全图采集：Z轴等步长飞拍，逐帧保存JPG，供离线标定使用。
 
-用法: python capture_scan.py --out-dir D:\scan --dec 2 --yes
-  --dec 1/2/4：decimation 降采样倍数（1=全幅 4096×3000）
+真实模式会自动读取相机最大传感器尺寸，并根据 --dec 设置
+Decimation。--dec 1 表示传感器全幅，2/4 表示对应降采样倍数。
+
+用法：
+    python capture_scan.py --out-dir D:\\scan --dec 2 --yes
 """
 
 import argparse
@@ -15,7 +17,7 @@ from typing import List, Optional, Tuple
 
 import cv2
 # 12M:4096x3000
-from backend.constants import SENSOR_W, SENSOR_H
+from backend.camera_utils import set_coarse_frame
 # ============================================================
 # 帧收集器：回调入队 → 工作线程逐帧保存 JPG
 # ============================================================
@@ -41,19 +43,6 @@ class CaptureCollector:
         self._thread: Optional[threading.Thread] = None
         os.makedirs(out_dir, exist_ok=True)
 
-    @staticmethod
-    def set_full_frame(cam, binning: int = 1, dec: int = 1):
-        """复位到全幅 → 应用 decimation/binning → 设对应分辨率窗口。"""
-        cam.set_binning(1, 1)
-        cam.set_decimation(1, 1)
-        cam.set_roi(0, 0, SENSOR_W, SENSOR_H)
-        if dec > 1:
-            cam.set_decimation(dec, dec)  # 先降采样
-        if binning > 1:
-            cam.set_binning(binning, binning)
-        w = (SENSOR_W // binning // dec) // 4 * 4  # 分辨率 = 全幅 ÷ binning ÷ dec，4 对齐
-        h = (SENSOR_H // binning // dec) // 4 * 4
-        cam.set_roi(0, 0, w, h)
 
     def start(self):
         self._cam.set_trigger_mode("hardware")
@@ -160,11 +149,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="全图采集（等步长飞拍 → JPG）")
     p.add_argument("--out-dir", required=True, help="JPG 保存目录")
     p.add_argument("--mode", choices=["real", "sim"], default="real")
-    p.add_argument("--stroke-min", type=int, default=11100)
-    p.add_argument("--stroke-max", type=int, default=12300)
+    p.add_argument("--stroke-min", type=int, default=11700)
+    p.add_argument("--stroke-max", type=int, default=11900)
     p.add_argument("--step-um", type=int, default=5)
     p.add_argument("--start-index", type=int, default=0, help="文件命名起始编号（第一张 = start-index）")
-    p.add_argument("--exposure-us", type=int, default=600)
+    p.add_argument("--exposure-us", type=int, default=14364)
     p.add_argument("--gain-db", type=float, default=0.0)
     p.add_argument("--plc-host", default="192.168.100.88")
     p.add_argument("--plc-port", type=int, default=502)
@@ -217,9 +206,20 @@ def main(argv=None) -> int:
             cam.open()
             cam.set_exposure(args.exposure_us)
             cam.set_gain(args.gain_db)
-            CaptureCollector.set_full_frame(cam, 1, dec=args.dec)
-            print(f"降采样 dec={args.dec} → "
-                  f"{(SENSOR_W // args.dec) // 4 * 4} x {(SENSOR_H // args.dec) // 4 * 4}")
+            sensor_width, sensor_height = set_coarse_frame(
+                cam,
+                mode="decimation",
+                factor=args.dec,
+            )
+
+            capture_width = (sensor_width // args.dec) // 4 * 4
+            capture_height = (sensor_height // args.dec) // 4 * 4
+
+            print(
+                f"传感器={sensor_width}x{sensor_height}, "
+                f"降采样 dec={args.dec} → "
+                f"{capture_width}x{capture_height}"
+            )
         else:
             cam.open()
 

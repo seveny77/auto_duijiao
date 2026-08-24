@@ -1,6 +1,14 @@
-from pymodbus.client import ModbusTcpClient
-from .protocol import *
+import logging
 import time
+
+from pymodbus.client import ModbusTcpClient
+
+from .protocol import *
+
+
+logger = logging.getLogger(__name__)
+
+
 class PlcTimeoutError(Exception): ...
 class PlcConnectionError(Exception): ...
 
@@ -17,7 +25,11 @@ class PlcClient:
         )
         if not self._client.connect():
             raise PlcConnectionError(f"无法连接 PLC {self._host}:{self._port}")
-        print(f"PLC 已连接: {self._host}:{self._port}")
+        logger.info(
+            "PLC 已连接: %s:%d",
+            self._host,
+            self._port,
+        )
 
     def disconnect(self):
         if self._client:

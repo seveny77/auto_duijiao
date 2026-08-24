@@ -1,19 +1,45 @@
-from backend.config import FocusConfig
-from backend.result import SearchResult, CalibrateResult
-from backend.collector import PhaseCollector, save_jpg, save_phase_images
-from backend.detection import detect_roi
-from typing import Dict, List, Optional, Tuple
 import glob
-import numpy as np
-import cv2
-import time
+import logging
 import os
-from backend.strategies import STRATEGIES,SearchContext
-from backend.camera_utils import (
-    set_full_frame, set_coarse_frame, fallback_roi, frame_positions,
+import time
+from typing import (
+    Dict,
+    List,
+    Optional,
+    Tuple,
 )
-from adapters.evaluator_opencv import OpenCVSharpnessEvaluator
+
+import cv2
+import numpy as np
+
+from adapters.evaluator_opencv import (
+    OpenCVSharpnessEvaluator,
+)
+from backend.camera_utils import (
+    fallback_roi,
+    frame_positions,
+    set_coarse_frame,
+    set_full_frame,
+)
+from backend.collector import (
+    PhaseCollector,
+    save_jpg,
+    save_phase_images,
+)
+from backend.config import FocusConfig
+from backend.detection import detect_roi
+from backend.result import (
+    CalibrateResult,
+    SearchResult,
+)
+from backend.strategies import (
+    STRATEGIES,
+    SearchContext,
+)
 from focus_template import FocusTemplate
+
+
+logger = logging.getLogger(__name__)
 
 
 def build_sim_scores(n: int, start_um: int, step_um: int, peak_um: float,
@@ -77,59 +103,173 @@ def run_phase(
         preview_interval_s=preview_interval_s,
         phase_name=phase_name,
     )
-    collector.start()
-    t0 = time.perf_counter()
-    count = plc.flyscan_trigger(start_um, end_um, step_um, timeout_s=flyscan_timeout)
-    dur = time.perf_counter() - t0
-    if cancel_event is not None and cancel_event.is_set():
-        raise RuntimeError("用户取消")
-    if not collector.wait(count, wait_timeout):
-        if cancel_event is not None and cancel_event.is_set():
-            raise RuntimeError("用户取消")
-        raise RuntimeError(collector.error or f"帧处理超时: {collector.processed}/{count}")
-    # 正常路径：快速确认 3 次（每次 20ms，共 ~60ms）
-    # 若 processed 一直停在 count 且队列空 → 直接认为飞拍已结束，省 ~140ms
-    fast_ok = True
-    for _ in range(3):
-        if cancel_event is not None and cancel_event.is_set():
-            raise RuntimeError("用户取消")
-        time.sleep(0.02)
-        if collector.processed != count or not collector.queue_empty():
-            fast_ok = False
-            break
+    try:
+        # 启动相机硬件触发、注册回调，并启动图像评价线程。
+        collector.start()
 
-    if not fast_ok:
-        # 异常路径：还有帧在来（processed 在变 / 队列非空），才进完整 0.2s 稳定期
-        deadline = time.monotonic() + 2.0
-        last_processed = -1
-        stable_since = time.monotonic()
-        while time.monotonic() < deadline:
-            now = collector.processed
-            if now != last_processed:
-                last_processed = now
-                stable_since = time.monotonic()
-            elif time.monotonic() - stable_since >= 0.2:
-                break
+        # 触发 PLC 飞拍，并记录 PLC 飞拍阶段耗时。
+        t0 = time.perf_counter()
+        count = plc.flyscan_trigger(
+            start_um,
+            end_um,
+            step_um,
+            timeout_s=flyscan_timeout,
+        )
+        dur = time.perf_counter() - t0
+
+        # PLC 飞拍返回以后，立即检查用户是否已经请求取消。
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("用户取消")
+
+        # 等待 Collector 完成指定数量图像的清晰度评价。
+        if not collector.wait(count, wait_timeout):
+            # 获取一次统计快照，保证下面日志中的各项数字
+            # 来自同一个时间点。
+            stats = collector.stats()
+
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("用户取消")
+
+            if collector.error is not None:
+                raise RuntimeError(collector.error)
+
+            if stats["dropped"] > 0:
+                raise RuntimeError(
+                    "图像处理队列溢出: "
+                    f"PLC={count}, "
+                    f"收到={stats['received']}, "
+                    f"入队={stats['enqueued']}, "
+                    f"丢弃={stats['dropped']}, "
+                    f"处理={stats['processed']}"
+                )
+
+            raise RuntimeError(
+                "帧处理超时: "
+                f"PLC={count}, "
+                f"收到={stats['received']}, "
+                f"入队={stats['enqueued']}, "
+                f"丢弃={stats['dropped']}, "
+                f"处理={stats['processed']}"
+            )
+
+        # 正常路径下快速确认三次。
+        #
+        # 如果 processed 一直等于 PLC 返回数量，并且队列为空，
+        # 说明所有帧已经完成评价，不必进入后面的完整稳定期。
+        fast_ok = True
+        for _ in range(3):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("用户取消")
             time.sleep(0.02)
 
-    # 稳定期结束后，张数严格校验保持不变（这条永远不能删）
-    if collector.processed != count:
-        raise RuntimeError(f"帧数不符: 处理 {collector.processed}, PLC 返回 {count}")
-    if count != expected_n:
-        print(f"[警告] PLC 返回 {count} 帧, 预期 {expected_n}")
-    return collector, count, dur
+            if (
+                    collector.processed != count
+                    or not collector.queue_empty()
+            ):
+                fast_ok = False
+                break
+
+        if not fast_ok:
+            # 如果仍有帧进入或队列仍在变化，
+            # 最多等待两秒，直到处理数量稳定至少 0.2 秒。
+            deadline = time.monotonic() + 2.0
+            last_processed = -1
+            stable_since = time.monotonic()
+
+            while time.monotonic() < deadline:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("用户取消")
+
+                now = collector.processed
+
+                if now != last_processed:
+                    last_processed = now
+                    stable_since = time.monotonic()
+
+                elif time.monotonic() - stable_since >= 0.2:
+                    break
+
+                time.sleep(0.02)
+
+        # 稳定期结束以后必须执行严格张数检查。
+        #
+        # 如果处理数量比 PLC 返回数量少，说明发生了丢帧；
+        # 如果处理数量更多，说明可能混入了额外触发。
+        if collector.processed != count:
+            stats = collector.stats()
+
+            raise RuntimeError(
+                "帧数不符: "
+                f"PLC={count}, "
+                f"收到={stats['received']}, "
+                f"入队={stats['enqueued']}, "
+                f"丢弃={stats['dropped']}, "
+                f"处理={stats['processed']}"
+            )
+
+        # PLC 返回帧数与根据扫描参数计算出的理论帧数不一致时，
+        # 当前先给出警告，但仍然允许调用方继续处理实际采集结果。
+        if count != expected_n:
+            logger.warning(
+                "PLC 返回 %d 帧，预期 %d",
+                count,
+                expected_n,
+            )
+
+        # 只有完整成功时，才把仍然可供读取分数和图像的
+        # Collector 交给调用方。
+        #
+        # 正常路径下由调用方在读取完数据后执行 collector.stop()。
+        return collector, count, dur
+
+    except Exception:
+        # 只要本阶段没有成功返回，Collector 就不会被调用方拿到。
+        #
+        # 因此 run_phase 必须负责停止相机取流和后台评价线程，
+        # 防止异常后留下旧回调或后台线程。
+        collector.stop()
+
+        # 不在这里把异常转换成另一个异常，
+        # 原始异常继续交给 run_search / run_calibrate 统一处理。
+        raise
 
 def run_search(cfg) -> int:
     # ── ① 加载模板 ──
     cancel = cfg.cancel_event  # CLI 运行时没有该属性 → None
     strategy_cls = STRATEGIES.get(cfg.strategy)
     if strategy_cls is None:
-        return SearchResult(rc=1, action="search", error=f"未知策略: {cfg.strategy}")
+        error_message = (
+            f"未知搜索策略: {cfg.strategy}"
+        )
+
+        logger.error(
+            "%s",
+            error_message,
+        )
+
+        return SearchResult(
+            rc=1,
+            action="search",
+            error=error_message,
+        )
+
     strategy = strategy_cls()
     if not os.path.exists(cfg.template):
-        print(f"[错误] 模板不存在: {cfg.template}，请先运行 --action calibrate")
-        return SearchResult(rc=1, action="search",
-                            error="[错误] 模板不存在: ...")
+        error_message = (
+            f"模板不存在: {cfg.template}，"
+            "请先执行标定生成模板"
+        )
+
+        logger.error(
+            "%s",
+            error_message,
+        )
+
+        return SearchResult(
+            rc=1,
+            action="search",
+            error=error_message,
+        )
     template = FocusTemplate.load(cfg.template)
 
     ct = {}                     # 各阶段耗时统计（ms）
@@ -145,6 +285,7 @@ def run_search(cfg) -> int:
 
     # ── 组件选择：sim 用假硬件，real 用真硬件 ──
     sim = cfg.mode == "sim"
+    sensor_size = None
     if sim:
         from autofocus_sim import FakePlcClient, SimCamera, ScoreMapEvaluator
         sim_peak_um = search_start + (n_coarse // 2) * coarse_step
@@ -170,13 +311,28 @@ def run_search(cfg) -> int:
             cam.open()
             cam.set_exposure(cfg.coarse_exposure_us or cfg.exposure_us)
             cam.set_gain(cfg.gain_db)
-            set_coarse_frame(cam, cfg.coarse_downsample, cfg.coarse_binning)
+            sensor_size = set_coarse_frame(
+                cam,
+                cfg.coarse_downsample,
+                cfg.coarse_binning,
+            )
             ct["camera_setup_ms"] = (time.perf_counter() - t0) * 1000
             if not cfg.yes:
-                ans = input("⚠️  即将触发 PLC 粗扫飞拍（Z 轴会运动），确认请输入 yes: ")
+                ans = input(
+                    "⚠️  即将触发 PLC 粗扫飞拍"
+                    "（Z 轴会运动），确认请输入 yes: "
+                )
+
                 if ans.strip().lower() != "yes":
-                    print("用户取消")
-                    return SearchResult(rc=1, action="search", error="用户取消")
+                    logger.info(
+                        "用户取消搜索流程"
+                    )
+
+                    return SearchResult(
+                        rc=1,
+                        action="search",
+                        error="用户取消",
+                    )
 
         # ── ② 策略预测 ──
         ctx = SearchContext(
@@ -200,16 +356,25 @@ def run_search(cfg) -> int:
         coarse_scores = [
             score for position, score in coarse_points
         ]
-        print(
-            f"策略={cfg.strategy}: "
-            f"预测峰={predicted_peak_um}µm  "
-            f"quality={quality}  "
-            f"ncc_max={ncc_max:.3f}"
+        logger.info(
+            "策略=%s: "
+            "预测峰=%sµm  "
+            "quality=%s  "
+            "ncc_max=%.3f",
+            cfg.strategy,
+            predicted_peak_um,
+            quality,
+            ncc_max,
         )
 
         # ── ③ 检测定 ROI（sim 直接降级居中 ROI，不跑 YOLO）──
         if sim:
-            roi, roi_src,detect_box = fallback_roi(cfg.roi_fallback_size), "fallback(sim)",None
+            roi = fallback_roi(
+                cfg.roi_fallback_size,
+                sensor_size=sensor_size,
+            )
+            roi_src = "fallback(sim)"
+            detect_box = None
         else:
             if coarse_best_img is None:
                 raise RuntimeError(
@@ -223,16 +388,40 @@ def run_search(cfg) -> int:
                 cfg.coarse_binning,
                 cfg.roi_fallback_size,
                 model=cfg.detect_model_obj,
+                sensor_size=sensor_size,
             )
             ct["yolo_ms"] = (time.perf_counter() - t0) * 1000
-        print(f"ROI: {roi}（来源: {roi_src}）")
-        if cancel is not None and cancel.is_set():
-            return SearchResult(rc=1, action="search", error="用户取消")
+        logger.info(
+            "ROI: %s（来源: %s）",
+            roi,
+            roi_src,
+        )
+        if (
+                cancel is not None
+                and cancel.is_set()
+        ):
+            logger.info(
+                "用户在 ROI 检测后取消搜索流程"
+            )
+
+            return SearchResult(
+                rc=1,
+                action="search",
+                error="用户取消",
+            )
         # ── ④ 精扫区间 ──
-        if quality in ("mismatch", "boundary") and coarse_points:
-            print(
-                f"[警告] quality={quality}，"
-                "精扫区间降级为粗扫峰±2×粗扫步距"
+        if (
+                quality in (
+                "mismatch",
+                "boundary",
+        )
+                and coarse_points
+        ):
+            logger.warning(
+                "quality=%s，"
+                "精扫区间降级为"
+                "粗扫峰±2×粗扫步距",
+                quality,
             )
             lo, hi, _, _ = compute_interval(
                 coarse_positions,
@@ -282,8 +471,15 @@ def run_search(cfg) -> int:
         if any(s is None for s in fine_scores):
             raise RuntimeError("精扫缺帧")
         best_f = max(range(count_f), key=lambda i: fine_scores[i])
-        if best_f == 0 or best_f == count_f - 1:
-            print(f"[警告] 精扫最佳帧在边界({best_f}/{count_f-1})")
+        if (
+                best_f == 0
+                or best_f == count_f - 1
+        ):
+            logger.warning(
+                "精扫最佳帧在边界（%d/%d）",
+                best_f,
+                count_f - 1,
+            )
         fine_positions = frame_positions(count_f, lo, fine_step)
         if cfg.save_images:
             save_phase_images(col_f, count_f, fine_positions, "fine", cfg.save_images)
@@ -314,16 +510,30 @@ def run_search(cfg) -> int:
                              os.path.join(cfg.save_images, f"final_{final_pos:.0f}um.jpg"))
             final_col.stop()  # ★ 补上：定拍取流结束立刻停
         else:
-            print(f"[sim] 定拍 PLC index={best_f + 1}（FakePlc 已记录）")
+            logger.info(
+                "[sim] 定拍 PLC index=%d"
+                "（FakePlc 已记录）",
+                best_f + 1,
+            )
 
         ct["final_ms"] = (time.perf_counter() - t0) * 1000
         ct["total_ms"] = (time.perf_counter() - t_total) * 1000
 
-        print(f"精扫: {count_f} 帧, 最佳={best_f}, 定拍 PLC index={best_f + 1}")
-        print(
-            f"策略={cfg.strategy}: "
-            f"预测峰={predicted_peak_um}µm  "
-            f"quality={quality}"
+        logger.info(
+            "精扫: %d 帧，"
+            "最佳=%d，"
+            "定拍 PLC index=%d",
+            count_f,
+            best_f,
+            best_f + 1,
+        )
+        logger.info(
+            "策略=%s: "
+            "预测峰=%sµm  "
+            "quality=%s",
+            cfg.strategy,
+            predicted_peak_um,
+            quality,
         )
         return SearchResult(  # 成功
             rc=0, action="search",
@@ -340,19 +550,58 @@ def run_search(cfg) -> int:
             ct_ms=ct,
         )
     except Exception as e:
-        print(f"[错误] {e}")
+        exception_type = type(e).__name__
+        exception_message = str(e).strip()
+
+        if exception_message:
+            error_message = exception_message
+        else:
+            error_message = exception_type
+
+        # 用户取消是正常控制流程，
+        # 不记录成 ERROR，也不输出异常调用栈。
+        if "取消" in error_message:
+            logger.info(
+                "用户取消搜索流程"
+            )
+
+        else:
+            # 其他异常属于搜索流程失败。
+            #
+            # logger.exception() 必须在 except 中调用，
+            # 它会自动附加当前异常的完整 traceback。
+            logger.exception(
+                "搜索流程异常: "
+                "mode=%s, strategy=%s",
+                cfg.mode,
+                cfg.strategy,
+            )
+
         return SearchResult(
             rc=1,
             action="search",
-            error=str(e),
+            error=error_message,
         )
     finally:
         if cam is not None:
-            try: cam.close()
-            except Exception: pass
+            try:
+                cam.close()
+
+            except Exception as cleanup_error:
+                logger.warning(
+                    "搜索结束时关闭相机失败: %s",
+                    cleanup_error,
+                )
+
         if plc is not None:
-            try: plc.disconnect()
-            except Exception: pass
+            try:
+                plc.disconnect()
+
+            except Exception as cleanup_error:
+                logger.warning(
+                    "搜索结束时断开 PLC 失败: %s",
+                    cleanup_error,
+                )
 
 def run_calibrate(cfg) -> int:
     cancel = cfg.cancel_event
@@ -372,8 +621,13 @@ def run_calibrate(cfg) -> int:
         template.meta["start_um"] = cal_start
         template.meta["step_um"] = cal_step
         template.save(cfg.template)
-        print(f"[sim] 模板已保存: {cfg.template}（峰 index={template.peak_position}, "
-              f"FWHM={template.peak_width:.2f}）")
+        logger.info(
+            "[sim] 模板已保存: %s"
+            "（峰 index=%d，FWHM=%.2f）",
+            cfg.template,
+            template.peak_position,
+            template.peak_width,
+        )
         return CalibrateResult(
             rc = 0,
             action= "calibrate",
@@ -382,7 +636,6 @@ def run_calibrate(cfg) -> int:
             peak_um= sim_peak_um,
             ct_ms= {"sim_total_ms": (time.perf_counter() - t0) * 1000}
         )
-        return {}
 
     if cfg.calibrate_images:            # 离线分支（本课）
         t_total = time.perf_counter()
@@ -395,8 +648,16 @@ def run_calibrate(cfg) -> int:
         n = len(images_paths)
         expected = n_cal
         if n != expected:
-            print(f"[警告] 图片 {n} 张 ≠ 网格 {expected}（cal_span/cal_step 可能和采图参数不一致）")
-        print(f"加载 {n} 张图片")
+            logger.warning(
+                "标定图片 %d 张 ≠ 标定网格 %d，"
+                "cal_span/cal_step 可能与采图参数不一致",
+                n,
+                expected,
+            )
+        logger.info(
+            "加载 %d 张标定图片",
+            n,
+        )
         roi = None;scores = []
         evaluator = OpenCVSharpnessEvaluator()
         t0 = time.perf_counter()
@@ -412,17 +673,41 @@ def run_calibrate(cfg) -> int:
         template = FocusTemplate.from_fullscan(scores, roi=roi, total_images=n)
         template.meta["start_um"] = cal_start
         template.meta["step_um"] = cal_step
-        peak_um = cfg.search_start_um + (template.peak_position+1)* cfg.coarse_step_um
+        peak_um = (
+                cal_start
+                + (template.peak_position + 1)
+                * cal_step
+        )
         # 保存
         template.save(cfg.template)
         tpl_ms = (time.perf_counter() - t_tpl) * 1000
 
         # 摘要
-        print(f"全扫耗时: {elapsed:.2f}s")
-        print(f"峰位置:   {template.peak_position}")
-        print(f"FWHM:     {template.peak_width:.2f}")
-        print(f"分数范围: [{template.meta['score_min']:.1f}, {template.meta['score_max']:.1f}]")
-        print(f"模板已保存: {cfg.template}")
+        logger.info(
+            "全扫评价耗时: %.2fs",
+            elapsed,
+        )
+
+        logger.info(
+            "模板峰 index: %d",
+            template.peak_position,
+        )
+
+        logger.info(
+            "模板 FWHM: %.2f",
+            template.peak_width,
+        )
+
+        logger.info(
+            "标定分数范围: [%.1f, %.1f]",
+            template.meta["score_min"],
+            template.meta["score_max"],
+        )
+
+        logger.info(
+            "模板已保存: %s",
+            cfg.template,
+        )
         return CalibrateResult(
                 rc= 0,
                 action="calibrate",
@@ -436,6 +721,8 @@ def run_calibrate(cfg) -> int:
         from camera import HikCamera
         ct = {}
         t_total = time.perf_counter()
+        plc = None
+        cam = None
         try:
             plc = PlcClient(cfg.plc_host, cfg.plc_port, timeout=5.0)
             cam = HikCamera(cfg.camera_index)
@@ -454,9 +741,21 @@ def run_calibrate(cfg) -> int:
             ct["camera_setup_ms"] = (time.perf_counter() - t0) * 1000
 
             if not cfg.yes:
-                ans = input("⚠️  即将触发 PLC 全扫（Z 轴会运动），确认请输入 yes: ")
-                if ans != "yes":
-                    CalibrateResult(rc=1, error="用户取消标定")
+                ans = input(
+                    "⚠️  即将触发 PLC 全扫"
+                    "（Z 轴会运动），确认请输入 yes: "
+                )
+
+                if ans.strip().lower() != "yes":
+                    logger.info(
+                        "用户取消标定流程"
+                    )
+
+                    return CalibrateResult(
+                        rc=1,
+                        action="calibrate",
+                        error="用户取消标定",
+                    )
 
             # 全扫：起点=cal_start，终点=cal_start+n_cal*step（含尾不含首）
             t0 = time.perf_counter()
@@ -491,30 +790,73 @@ def run_calibrate(cfg) -> int:
             template.save(cfg.template)
             ct["template_ms"] = (time.perf_counter() - t0) * 1000
             ct["total_ms"] = (time.perf_counter() - t_total) * 1000
-            print(f"标定完成: 峰={template.peak_position} FWHM={template.peak_width:.2f} "
-                  f"位置≈{cal_start + (template.peak_position + 1) * cal_step}µm")
+            peak_um = (
+                    cal_start
+                    + (template.peak_position + 1)
+                    * cal_step
+            )
+            logger.info(
+                "标定完成: "
+                "峰 index=%d，"
+                "FWHM=%.2f，"
+                "位置≈%sµm",
+                template.peak_position,
+                template.peak_width,
+                peak_um,
+            )
             if cfg.save_images:
                 cal_positions = frame_positions(count, cal_start, cal_step)
                 save_phase_images(col, count, cal_positions, "cal", cfg.save_images)
             return CalibrateResult(
-                rc= 0,
-                action= "calibrate",
-                peak_position= template.peak_position,
-                peak_width= template.peak_width,
-                peak_um= cal_start + (template.peak_position + 1) * cal_step,
-                ct_ms= ct,
+                rc=0,
+                action="calibrate",
+                peak_position=template.peak_position,
+                peak_width=template.peak_width,
+                peak_um=peak_um,
+                ct_ms=ct,
             )
         except Exception as e:
-            print(f"[错误] {e}")
-            return CalibrateResult(rc=1, error=str(e))
+            exception_type = type(e).__name__
+            exception_message = str(e).strip()
+
+            if exception_message:
+                error_message = exception_message
+            else:
+                error_message = exception_type
+
+            if "取消" in error_message:
+                logger.info(
+                    "用户取消标定流程"
+                )
+
+            else:
+                logger.exception(
+                    "标定流程异常: mode=%s",
+                    cfg.mode,
+                )
+
+            return CalibrateResult(
+                rc=1,
+                action="calibrate",
+                error=error_message,
+            )
         finally:
             if cam is not None:
                 try:
                     cam.close()
-                except Exception:
-                    pass
+
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "标定结束时关闭相机失败: %s",
+                        cleanup_error,
+                    )
+
             if plc is not None:
                 try:
                     plc.disconnect()
-                except Exception:
-                    pass
+
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "标定结束时断开 PLC 失败: %s",
+                        cleanup_error,
+                    )

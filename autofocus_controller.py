@@ -26,6 +26,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from backend.camera_utils import (
+    RoiAlignmentError,
+    align_window,
+)
 from focus_template import FocusTemplate
 
 
@@ -252,17 +256,20 @@ class AutofocusController:
         sensor_size: Tuple[int, int] = (2600, 2160),
         inc: int = 4,
     ) -> Tuple[int, int, int, int]:
-        """硬件开窗前校验/对齐：Offset 与宽高必须是 inc 的倍数且不越界。
-        不对齐时向下对齐并打印警告；越界时报错。"""
-        x, y, w, h = roi
-        if any(v % inc for v in (x, y, w, h)):
-            ax, ay, aw, ah = (v - v % inc for v in (x, y, w, h))
-            print(f"[警告] 开窗参数需 {inc} 对齐: ({x},{y},{w},{h}) -> ({ax},{ay},{aw},{ah})")
-            x, y, w, h = ax, ay, aw, ah
-        sw, sh = sensor_size
-        if w < inc or h < inc or x < 0 or y < 0 or x + w > sw or y + h > sh:
-            raise AutofocusError(f"开窗越界: ({x},{y},{w},{h}) 超出传感器 {sw}x{sh}")
-        return (x, y, w, h)
+        """旧版兼容入口，实际逻辑由 camera_utils 统一实现。"""
+
+        try:
+            return align_window(
+                roi=roi,
+                sensor_size=sensor_size,
+                inc=inc,
+            )
+
+        except RoiAlignmentError as error:
+            # 保持旧版异常类型不变，兼容旧调用方和测试。
+            raise AutofocusError(
+                str(error)
+            ) from error
 
     @staticmethod
     def compute_flyscan_params(
