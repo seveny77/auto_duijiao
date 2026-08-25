@@ -1,0 +1,6 @@
+name: autofocus
+channels:
+  - defaults
+dependencies:
+  - python=3.13.11
+  - pip

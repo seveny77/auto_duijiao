@@ -13,9 +13,24 @@ logger = logging.getLogger(__name__)
 class DetectionModelService:
     """负责加载并持有搜索流程共用的YOLO模型。"""
 
-    def __init__(self, model_path: str = None):
+    def __init__(
+            self,
+            model_path: str = None,
+            project_root: str = None,
+    ):
         default_path = FocusConfig().detect_model
         self._model_path = model_path or default_path
+
+        if (
+                self._model_path
+                and project_root
+                and not os.path.isabs(self._model_path)
+        ):
+            self._model_path = os.path.join(
+                project_root,
+                self._model_path,
+            )
+
         self._model = None
 
     @property

@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fine-binning", type=int, default=1)
     p.add_argument(
         "--detect-model",
-        default=r"F:\项目\自动对焦\code\detect\runs\detect\autofocus\weights\best.pt",
+        default="assets/models/yolo/best.pt",
         help="YOLO 模型路径（缺失则降级居中 ROI）",
     )
     p.add_argument("--detect-conf", type=float, default=0.5)

@@ -64,3 +64,12 @@ gui/config.json
 /roi_preview.jpg
 /_motor.pdf
 /_patch.txt
+/.codex-bg-edit/
+/output/
+
+
+# ==============================
+# 工控机运行资产
+# 模型通过独立部署包传输，不提交到 Git
+# ==============================
+/assets/models/

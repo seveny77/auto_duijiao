@@ -25,6 +25,12 @@ class FocusConfig:
     mode: str = "real"                         # real / sim
     strategy: str = "ncc"
     template: str = "data/template.json"
+
+    # AI对焦策略参数。
+    dl_model: str = "assets/models/ai/best_resnet.pt"
+    shot_position_um: Optional[int] = None
+    dl_max_abs_delta_um: float = 600.0
+
     plc_host: str = "192.168.100.88"
     plc_port: int = 502
     camera_index: int = 0
@@ -49,7 +55,7 @@ class FocusConfig:
     coarse_binning: int = 4
     coarse_downsample: str = "decimation"
     fine_binning: int = 1
-    detect_model: str = r"F:\项目\自动对焦\code\detect\runs\detect\autofocus\weights\best.pt"
+    detect_model: str = "assets/models/yolo/best.pt"
     detect_conf: float = 0.5
     roi_fallback_size: int = 1500
 
@@ -63,6 +69,7 @@ class FocusConfig:
 
     cancel_event: Optional[object] = None      # 运行期注入：停止开关
     detect_model_obj: Optional[object] = None  # 运行期注入：已加载的 YOLO
+    dl_model_obj: Optional[object] = None      # 运行期注入：已经加载和预热的AI对焦模型。
     # CLI 或无界面运行时保持 None，不产生任何预览开销。
     # image, phase, sequence, score
     preview_callback: Optional[PreviewCallback] = None

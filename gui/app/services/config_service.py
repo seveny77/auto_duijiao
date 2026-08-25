@@ -23,6 +23,18 @@ class ConfigService:
         self._panel = panel
         self._project_root = project_root
 
+    def _current_strategy(self) -> str:
+        """根据当前策略选项卡返回后端策略名称。"""
+
+        current_index = (
+            self._panel.strategy_tabs.currentIndex()
+        )
+
+        if current_index == self._panel.ai_tab_index:
+            return "dl"
+
+        return "ncc"
+
     def collect(self) -> dict:
         """收集参数面板中的当前配置。"""
 

@@ -1,9 +1,22 @@
-from verify_ncc_full import frame_positions, run_phase, PhaseCollector, detect_roi, save_jpg,_get_detect_model, \
-    set_full_frame, set_coarse_frame
-from train_dlfocus import DLDistanceModel
+from backend.camera_utils import (
+    frame_positions,
+    set_coarse_frame,
+    set_full_frame,
+)
+from backend.collector import (
+    PhaseCollector,
+    save_jpg,
+)
+from backend.detection import (
+    _get_detect_model,
+    detect_roi,
+)
+from backend.dl_focus_model import DLDistanceModel
+from backend.pipeline import run_phase
+
 import argparse
-import sys
 import os
+import sys
 import time
 
 def fine_scan_params(predicted_peak_um, half_points=10, step_um=5):
@@ -41,12 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument(
         "--detect-model",
-        default=r"F:\项目\自动对焦\code\detect\runs\detect\autofocus\weights\best.pt",
+        default="assets/models/yolo/best.pt",
         help="YOLO 模型路径（缺失则降级居中 ROI）",
     )
     p.add_argument(
         "--model",
-        default=r"F:\项目\自动对焦\code\ct-roi\dlfocus_out/best_resnet.pt",
+        default="assets/models/ai/best_resnet.pt",
         help="回归模型路径",
     )
     p.add_argument("--detect-conf", type=float, default=0.5)

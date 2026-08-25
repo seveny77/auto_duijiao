@@ -94,7 +94,9 @@ class MainWindow(QMainWindow):
 
         self.focus_task_service = FocusTaskService()
 
-        self.detection_model_service = DetectionModelService()
+        self.detection_model_service = DetectionModelService(
+            project_root=PROJECT_ROOT,
+        )
         self.detection_model_service.load()
 
         self.live_view_service = LiveViewService(
