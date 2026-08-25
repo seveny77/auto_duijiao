@@ -2,6 +2,23 @@
 
 目标目录：`C:\Autofocus\app`。
 
+## 基础运行工具
+
+第一次部署时执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\bootstrap_runtime.ps1
+```
+
+脚本会下载并校验 MinGit 和 Miniconda，然后安装到
+`C:\Autofocus\runtime`，不会修改系统默认 Python。
+
+如果工控机不能直连 GitHub，可以先只安装 Miniconda：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\bootstrap_runtime.ps1 -SkipGit
+```
+
 ## Python 环境
 
 在项目根目录执行：
