@@ -1,0 +1,756 @@
+# -*- coding: utf-8 -*-
+"""凌臣M60运动控制SDK的底层Python封装。"""
+
+import ctypes
+import logging
+import os
+from pathlib import Path
+from typing import Optional
+from dataclasses import dataclass
+
+from motion.lct.errors import (
+    LctLibraryLoadError,
+    LctSdkCallError,
+    LctStateError,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+M60_SUCCESS = 0
+
+M60_ERROR_MESSAGES = {
+    0: "执行成功",
+    1: "执行错误",
+    2: "固件未授权",
+    3: "接口参数错误",
+    4: "设备未打开",
+    5: "EtherCAT从站未连接",
+    6: "设备掉线",
+    7: "FPGA指令执行超时",
+    8: "SDO操作返回超时",
+    9: "设备驱动故障",
+    10: "文件打开失败",
+    11: "文件操作失败",
+    12: "系统资源不足",
+    13: "尚未加载ENI文件",
+    14: "指令未定义",
+    15: "数据校验错误",
+    16: "指令数据写入超时",
+    17: "指令数据读取超时",
+    19: "伺服未使能",
+    20: "从站别名冲突",
+    21: "ENI文件中找不到对应从站",
+    22: "看门狗超时",
+    23: "急停信号已触发",
+    30: "EtherCAT网络拓扑发生变化",
+}
+
+class _M60SlaveResource(ctypes.Structure):
+    """与厂家SL_RES结构体保持相同的内存布局。"""
+
+    _fields_ = [
+        ("slave_num", ctypes.c_int),
+        ("axis_num", ctypes.c_int),
+        ("io_slave_num", ctypes.c_int),
+        ("di_num", ctypes.c_int),
+        ("do_num", ctypes.c_int),
+        ("ai_num", ctypes.c_int),
+        ("ao_num", ctypes.c_int),
+        ("input_variable_num", ctypes.c_int),
+        ("output_variable_num", ctypes.c_int),
+    ]
+
+
+@dataclass(frozen=True)
+class M60SlaveResource:
+    """供上层Python代码使用的EtherCAT从站资源信息。"""
+
+    slave_num: int
+    axis_num: int
+    io_slave_num: int
+    di_num: int
+    do_num: int
+    ai_num: int
+    ao_num: int
+    input_variable_num: int
+    output_variable_num: int
+
+class M60Api:
+    """ecat_motion.dll的底层调用封装。
+
+    创建对象时只保存DLL路径，不会自动加载DLL，也不会打开板卡。
+    调用顺序为：
+
+        api = M60Api(dll_path)
+        api.load()
+        api.open(card_no=0)
+        ...
+        api.close()
+    """
+
+    def __init__(self, dll_path: str):
+        self._dll_path = Path(dll_path)
+
+        self._dll = None
+        self._dll_directory_handle = None
+
+        self._opened_card: Optional[int] = None
+        self._eni_loaded = False
+        self._ecat_connected = False
+        self._axis_params_loaded = False
+
+    @property
+    def dll_path(self) -> Path:
+        """返回当前配置的M60 DLL路径。"""
+
+        return self._dll_path
+
+    @property
+    def is_loaded(self) -> bool:
+        """返回M60 DLL是否已经加载。"""
+
+        return self._dll is not None
+
+    @property
+    def is_open(self) -> bool:
+        """返回M60板卡是否已经打开。"""
+
+        return self._opened_card is not None
+
+    @property
+    def opened_card(self) -> Optional[int]:
+        """返回当前已经打开的卡号。"""
+
+        return self._opened_card
+
+    @property
+    def eni_loaded(self) -> bool:
+        """返回M60是否已经成功加载ENI配置。"""
+
+        return self._eni_loaded
+
+    @property
+    def ecat_connected(self) -> bool:
+        """返回M60 EtherCAT总线是否已经连接。"""
+
+        return self._ecat_connected
+
+    @property
+    def axis_params_loaded(self) -> bool:
+        """返回M60轴参数文件是否已经加载。"""
+
+        return self._axis_params_loaded
+
+    def load(self) -> None:
+        """加载ecat_motion.dll并绑定基础函数签名。"""
+
+        if self._dll is not None:
+            return
+
+        if not self._dll_path.is_file():
+            raise LctLibraryLoadError(
+                f"M60 DLL不存在: {self._dll_path}"
+            )
+
+        try:
+            # Python 3.8以后，Windows不会再默认搜索DLL所在目录中的
+            # 其他依赖库。因此需要把厂家DLL目录加入当前进程的
+            # DLL搜索路径，并保存返回的句柄。
+            if (
+                os.name == "nt"
+                and hasattr(os, "add_dll_directory")
+            ):
+                self._dll_directory_handle = (
+                    os.add_dll_directory(
+                        str(self._dll_path.parent)
+                    )
+                )
+
+            # C# Demo中M60函数使用CallingConvention.Cdecl，
+            # 因此Python中使用ctypes.CDLL。
+            self._dll = ctypes.CDLL(
+                str(self._dll_path)
+            )
+
+            self._bind_functions()
+
+        except (OSError, AttributeError) as error:
+            self._dll = None
+
+            python_bits = (
+                ctypes.sizeof(ctypes.c_void_p) * 8
+            )
+
+            raise LctLibraryLoadError(
+                "加载M60 DLL失败: "
+                f"path={self._dll_path}, "
+                f"Python={python_bits}位, "
+                f"原因={error}"
+            ) from error
+
+        logger.info(
+            "M60 DLL加载成功: %s",
+            self._dll_path,
+        )
+
+    def load_eni(
+            self,
+            eni_path: str,
+    ) -> None:
+        """加载M60的EtherCAT ENI配置文件。
+
+        本方法只加载网络配置，不连接EtherCAT，也不会使轴运动。
+        """
+
+        self._require_open()
+
+        if self._ecat_connected:
+            raise LctStateError(
+                "EtherCAT已经连接，不能重新加载ENI，"
+                "请先断开EtherCAT"
+            )
+
+        path = Path(eni_path)
+
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"M60 ENI文件不存在: {path}"
+            )
+
+        encoded_path = self._encode_sdk_path(
+            path
+        )
+
+        result = self._dll.M_LoadEni(
+            encoded_path,
+            ctypes.c_short(self._opened_card),
+        )
+
+        self._check_result(
+            operation="M_LoadEni",
+            result=result,
+        )
+
+        self._eni_loaded = True
+
+        self._axis_params_loaded = False
+
+        logger.info(
+            "M60 ENI加载成功: card=%d, path=%s",
+            self._opened_card,
+            path,
+        )
+
+    def reset_fpga(self) -> None:
+        """复位M60板卡FPGA。
+
+        厂家Demo要求在常规连接EtherCAT之前执行本操作，并在成功后
+        等待至少500毫秒。等待动作由后续上层初始化流程负责。
+        """
+
+        self._require_open()
+        if self._ecat_connected:
+            raise LctStateError(
+                "EtherCAT已经连接，不能直接复位FPGA，"
+                "请先断开EtherCAT"
+            )
+
+        result = self._dll.M_ResetFpga(
+            ctypes.c_short(self._opened_card)
+        )
+
+        self._check_result(
+            operation="M_ResetFpga",
+            result=result,
+        )
+
+        logger.info(
+            "M60 FPGA复位完成: card=%d",
+            self._opened_card,
+        )
+
+    def connect_ecat(
+            self,
+            option: int = 0,
+    ) -> None:
+        """连接M60管理的EtherCAT总线。
+
+        Args:
+            option:
+                连接选项。当前正式流程固定使用0，与现场验证Demo一致。
+        """
+
+        self._require_open()
+
+        if not self._eni_loaded:
+            raise LctStateError(
+                "尚未加载ENI，不能连接EtherCAT"
+            )
+
+        if self._ecat_connected:
+            return
+
+        if option not in (0, 1):
+            raise ValueError(
+                f"EtherCAT连接选项只能是0或1: {option}"
+            )
+
+        result = self._dll.M_ConnectECAT(
+            ctypes.c_short(option),
+            ctypes.c_short(self._opened_card),
+        )
+
+        self._check_result(
+            operation="M_ConnectECAT",
+            result=result,
+        )
+
+        self._ecat_connected = True
+        self._axis_params_loaded = False
+
+        logger.info(
+            "M60 EtherCAT连接成功: card=%d, option=%d",
+            self._opened_card,
+            option,
+        )
+
+    def disconnect_ecat(self) -> None:
+        """断开M60管理的EtherCAT总线。"""
+
+        if not self._ecat_connected:
+            return
+
+        self._require_open()
+
+        result = self._dll.M_DisconnectECAT(
+            ctypes.c_short(self._opened_card)
+        )
+
+        self._check_result(
+            operation="M_DisconnectECAT",
+            result=result,
+        )
+
+        self._ecat_connected = False
+        self._axis_params_loaded = False
+
+        logger.info(
+            "M60 EtherCAT已断开: card=%d",
+            self._opened_card,
+        )
+
+    def load_axis_params(
+            self,
+            param_path: str,
+    ) -> None:
+        """从ParamCard0.ini加载M60轴参数。"""
+
+        self._require_ecat_connected()
+
+        path = Path(param_path)
+
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"M60轴参数文件不存在: {path}"
+            )
+
+        encoded_path = self._encode_sdk_path(
+            path
+        )
+
+        result = self._dll.M_LoadParamFromFile(
+            encoded_path,
+            ctypes.c_short(self._opened_card),
+        )
+
+        self._check_result(
+            operation="M_LoadParamFromFile",
+            result=result,
+        )
+
+        self._axis_params_loaded = True
+
+        logger.info(
+            "M60轴参数加载成功: card=%d, path=%s",
+            self._opened_card,
+            path,
+        )
+
+    def get_slave_resource(
+            self,
+    ) -> M60SlaveResource:
+        """读取当前EtherCAT网络中的从站和轴资源。"""
+
+        self._require_ecat_connected()
+
+        raw_resource = _M60SlaveResource()
+
+        result = self._dll.M_GetSlaveResource(
+            ctypes.byref(raw_resource),
+            ctypes.c_short(self._opened_card),
+        )
+
+        self._check_result(
+            operation="M_GetSlaveResource",
+            result=result,
+        )
+
+        resource = M60SlaveResource(
+            slave_num=raw_resource.slave_num,
+            axis_num=raw_resource.axis_num,
+            io_slave_num=raw_resource.io_slave_num,
+            di_num=raw_resource.di_num,
+            do_num=raw_resource.do_num,
+            ai_num=raw_resource.ai_num,
+            ao_num=raw_resource.ao_num,
+            input_variable_num=(
+                raw_resource.input_variable_num
+            ),
+            output_variable_num=(
+                raw_resource.output_variable_num
+            ),
+        )
+
+        logger.info(
+            "M60 EtherCAT资源: "
+            "slave=%d, axis=%d, io_slave=%d, "
+            "DI=%d, DO=%d, AI=%d, AO=%d",
+            resource.slave_num,
+            resource.axis_num,
+            resource.io_slave_num,
+            resource.di_num,
+            resource.do_num,
+            resource.ai_num,
+            resource.ao_num,
+        )
+
+        return resource
+
+    def _require_ecat_connected(self) -> None:
+        """确认M60 EtherCAT总线已经连接。"""
+
+        self._require_open()
+
+        if not self._ecat_connected:
+            raise LctStateError(
+                "M60 EtherCAT尚未连接，"
+                "请先调用connect_ecat()"
+            )
+
+    def get_encoder_position(
+            self,
+            axis_no: int,
+    ) -> float:
+        """读取指定轴的M60编码器位置，返回厂家原始计数。"""
+
+        self._require_ecat_connected()
+
+        if axis_no <= 0:
+            raise ValueError(
+                f"M60轴号必须大于0: {axis_no}"
+            )
+
+        position = ctypes.c_double()
+
+        result = self._dll.M_GetEncPos(
+            ctypes.c_short(axis_no),
+            ctypes.byref(position),
+            ctypes.c_short(1),
+            ctypes.c_short(self._opened_card),
+        )
+
+        self._check_result(
+            operation="M_GetEncPos",
+            result=result,
+        )
+
+        return float(position.value)
+
+    def open(self, card_no: int = 0) -> None:
+        """打开指定M60板卡。
+
+        M_Open只负责打开板卡，不加载ENI、不连接EtherCAT、
+        不使能伺服，也不会发出运动指令。
+        """
+
+        self._require_loaded()
+
+        if card_no < 0:
+            raise ValueError(
+                f"M60卡号不能小于0: {card_no}"
+            )
+
+        if self._opened_card is not None:
+            if self._opened_card == card_no:
+                return
+
+            raise LctStateError(
+                "M60已有其他板卡处于打开状态: "
+                f"opened={self._opened_card}, "
+                f"requested={card_no}"
+            )
+
+        result = self._dll.M_Open(
+            ctypes.c_short(card_no),
+            ctypes.c_short(0),
+        )
+
+        self._check_result(
+            operation="M_Open",
+            result=result,
+        )
+
+        self._opened_card = card_no
+
+        logger.info(
+            "M60板卡已打开: card=%d",
+            card_no,
+        )
+
+    def close(self) -> None:
+        """关闭当前已经打开的M60板卡。"""
+
+        if self._opened_card is None:
+            return
+        if self._ecat_connected:
+            self.disconnect_ecat()
+
+        self._require_loaded()
+
+        card_no = self._opened_card
+
+        result = self._dll.M_Close(
+            ctypes.c_short(card_no)
+        )
+
+        self._check_result(
+            operation="M_Close",
+            result=result,
+        )
+
+        self._opened_card = None
+        self._eni_loaded = False
+        self._ecat_connected = False
+        self._axis_params_loaded = False
+
+        logger.info(
+            "M60板卡已关闭: card=%d",
+            card_no,
+        )
+
+    def get_version(
+        self,
+        buffer_size: int = 256,
+    ) -> str:
+        """读取M60板卡和SDK版本字符串。
+
+        调用本方法前必须先执行open()。
+        """
+
+        self._require_open()
+
+        if buffer_size <= 1:
+            raise ValueError(
+                "版本字符串缓冲区必须大于1字节"
+            )
+
+        version_buffer = ctypes.create_string_buffer(
+            buffer_size
+        )
+
+        result = self._dll.M_GetVersion(
+            version_buffer,
+            ctypes.c_int(buffer_size),
+            ctypes.c_short(self._opened_card),
+        )
+
+        self._check_result(
+            operation="M_GetVersion",
+            result=result,
+        )
+
+        raw_version = version_buffer.value
+
+        try:
+            return raw_version.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw_version.decode(
+                "gbk",
+                errors="replace",
+            )
+
+    def _bind_functions(self) -> None:
+        """声明当前使用的厂家函数参数和返回值类型。"""
+
+        if self._dll is None:
+            raise LctStateError(
+                "M60 DLL尚未加载"
+            )
+
+        # short M_Open(short card, short param)
+        self._dll.M_Open.argtypes = [
+            ctypes.c_short,
+            ctypes.c_short,
+        ]
+        self._dll.M_Open.restype = ctypes.c_short
+
+        # short M_Close(short card)
+        self._dll.M_Close.argtypes = [
+            ctypes.c_short,
+        ]
+        self._dll.M_Close.restype = ctypes.c_short
+
+        # short M_GetVersion(
+        #     byte* pVersion,
+        #     int size,
+        #     short card
+        # )
+        self._dll.M_GetVersion.argtypes = [
+            ctypes.POINTER(ctypes.c_char),
+            ctypes.c_int,
+            ctypes.c_short,
+        ]
+        self._dll.M_GetVersion.restype = ctypes.c_short
+
+        # short M_LoadEni(
+        #     char* eniPath,
+        #     short card
+        # )
+        self._dll.M_LoadEni.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_short,
+        ]
+        self._dll.M_LoadEni.restype = ctypes.c_short
+
+        # short M_ResetFpga(short card)
+        self._dll.M_ResetFpga.argtypes = [
+            ctypes.c_short,
+        ]
+        self._dll.M_ResetFpga.restype = ctypes.c_short
+
+        # short M_ConnectECAT(
+        #     short option,
+        #     short card
+        # )
+        self._dll.M_ConnectECAT.argtypes = [
+            ctypes.c_short,
+            ctypes.c_short,
+        ]
+        self._dll.M_ConnectECAT.restype = ctypes.c_short
+
+        # short M_DisconnectECAT(short card)
+        self._dll.M_DisconnectECAT.argtypes = [
+            ctypes.c_short,
+        ]
+        self._dll.M_DisconnectECAT.restype = ctypes.c_short
+
+        # short M_LoadParamFromFile(
+        #     char* filename,
+        #     short card
+        # )
+        self._dll.M_LoadParamFromFile.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_short,
+        ]
+        self._dll.M_LoadParamFromFile.restype = (
+            ctypes.c_short
+        )
+
+        # short M_GetSlaveResource(
+        #     SL_RES* resource,
+        #     short card
+        # )
+        self._dll.M_GetSlaveResource.argtypes = [
+            ctypes.POINTER(_M60SlaveResource),
+            ctypes.c_short,
+        ]
+        self._dll.M_GetSlaveResource.restype = (
+            ctypes.c_short
+        )
+
+        # short M_GetEncPos(
+        #     short encoder,
+        #     double* value,
+        #     short count,
+        #     short card
+        # )
+        self._dll.M_GetEncPos.argtypes = [
+            ctypes.c_short,
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.c_short,
+            ctypes.c_short,
+        ]
+        self._dll.M_GetEncPos.restype = ctypes.c_short
+
+    def _require_loaded(self) -> None:
+        """确认M60 DLL已经加载。"""
+
+        if self._dll is None:
+            raise LctStateError(
+                "M60 DLL尚未加载，请先调用load()"
+            )
+
+    def _require_open(self) -> None:
+        """确认M60板卡已经打开。"""
+
+        self._require_loaded()
+
+        if self._opened_card is None:
+            raise LctStateError(
+                "M60板卡尚未打开，请先调用open()"
+            )
+
+
+    @staticmethod
+    def _encode_sdk_path(path: Path) -> bytes:
+        """把Python路径转换成厂家C接口需要的字节字符串。
+
+        厂家C# Demo没有指定Unicode字符集，底层接口按照ANSI字符串
+        接收路径。Windows上使用当前系统代码页进行编码。
+        """
+
+        absolute_path = path.resolve()
+
+        encoding = (
+            "mbcs"
+            if os.name == "nt"
+            else "utf-8"
+        )
+
+        try:
+            return str(absolute_path).encode(
+                encoding
+            )
+
+        except UnicodeEncodeError as error:
+            raise ValueError(
+                "M60 SDK无法编码文件路径，请把SDK和参数文件放到"
+                "不含特殊字符的英文目录中: "
+                f"{absolute_path}"
+            ) from error
+
+    @staticmethod
+    def _check_result(
+        operation: str,
+        result: int,
+    ) -> None:
+        """把M60错误码转换成统一的Python异常。"""
+
+        result = int(result)
+
+        if result == M60_SUCCESS:
+            return
+
+        detail = M60_ERROR_MESSAGES.get(
+            result,
+            "未知M60错误",
+        )
+
+        raise LctSdkCallError(
+            device="M60",
+            operation=operation,
+            error_code=result,
+            detail=detail,
+        )

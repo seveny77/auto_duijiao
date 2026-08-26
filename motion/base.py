@@ -8,18 +8,18 @@ from typing import Tuple
 class MotionBackend(ABC):
     """自动对焦流程所依赖的运动控制接口。
 
-    上层 Pipeline 只表达“要完成什么动作”，不关心底层具体由
-    PLC、M60轴卡还是E4O4位置比较器完成。
+    上层Pipeline只表达需要完成的运动和拍照动作，不关心底层
+    具体由真实LCT轴卡还是仿真运动后端完成。
     """
 
     @property
     @abstractmethod
     def backend_name(self) -> str:
-        """返回运动后端名称，例如 plc 或 lct。"""
+        """返回运动后端名称，例如lct或sim。"""
 
     @abstractmethod
     def connect(self) -> None:
-        """连接运动控制设备并完成必要的初始化。"""
+        """连接运动控制设备并完成必要初始化。"""
 
     @abstractmethod
     def disconnect(self) -> None:
@@ -47,11 +47,7 @@ class MotionBackend(ABC):
     ) -> int:
         """执行等间距飞拍。
 
-        主要用于：
-
-        - NCC标定；
-        - 粗扫；
-        - 精扫。
+        主要用于NCC标定、粗扫和精扫。
 
         Args:
             start_um:
@@ -67,18 +63,11 @@ class MotionBackend(ABC):
                 本次飞拍允许的最大执行时间。
 
         Returns:
-            硬件实际输出的相机触发次数。
+            E4O4实际输出的相机触发次数。
 
-        注意：
-            对M60/E4O4后端，该方法由E4O4线性比较器实现。
-
-            当前约定第一个拍照位置为：
-
-                start_um + step_um
-
-            最后一个拍照位置为：
-
-                end_um
+        约定：
+            第一个拍照位置为start_um + step_um，
+            最后一个拍照位置为end_um。
         """
 
     @abstractmethod
@@ -87,7 +76,7 @@ class MotionBackend(ABC):
         position_um: int,
         timeout_s: float,
     ) -> int:
-        """在指定物理位置获取一张最终图像。
+        """在指定物理位置执行一次最终单点飞拍。
 
         Args:
             position_um:
@@ -97,19 +86,9 @@ class MotionBackend(ABC):
                 本次动作允许的最大执行时间。
 
         Returns:
-            硬件实际输出的相机触发次数，正常应当为1。
+            E4O4实际输出的相机触发次数，正常应当为1。
 
-        后端实现约定：
-
-        - PLC后端暂时继续使用现有定点拍照流程；
-        - M60/E4O4后端使用单点预设定比较器飞拍；
-        - 上层不再传递“最佳帧序号”，而是传递物理位置。
-        """
-
-    def finish_cycle(self) -> None:
-        """通知运动后端本轮自动对焦已经结束。
-
-        PLC后端需要写入流程完成寄存器。
-
-        M60/E4O4后端目前不需要额外通知，因此可以保留默认空实现。
+        实现约定：
+            M60先移动到目标位置前的准备位置，然后以设定速度经过
+            position_um；E4O4使用单点预设定比较器触发相机。
         """
