@@ -123,18 +123,36 @@ class FocusRunService:
         warnings = []
 
         # -------------------------------------------------
-        # 1. 计算本轮真正使用的扫描范围
+        # 1. 计算本轮真正使用的运动范围
         # -------------------------------------------------
         if cfg.action == "calibrate":
-            start_um = cfg.calibrate_start_um or cfg.search_start_um
-            span_um = cfg.calibrate_span_um or cfg.search_span_um
+            start_um = (
+                cfg.calibrate_start_um
+                if cfg.calibrate_start_um is not None
+                else cfg.search_start_um
+            )
+            span_um = (
+                cfg.calibrate_span_um
+                if cfg.calibrate_span_um is not None
+                else cfg.search_span_um
+            )
             step_um = cfg.calibrate_step_um
             phase_name = "标定"
-        else:
+            requires_scan = True
+
+        elif cfg.strategy == "ncc":
             start_um = cfg.search_start_um
             span_um = cfg.search_span_um
             step_um = cfg.coarse_step_um
-            phase_name = "搜索"
+            phase_name = "NCC 搜索"
+            requires_scan = True
+
+        else:
+            start_um = cfg.search_start_um
+            span_um = cfg.search_span_um
+            step_um = None
+            phase_name = "AI 搜索"
+            requires_scan = False
 
         end_um = start_um + span_um
 
@@ -142,25 +160,33 @@ class FocusRunService:
         # 2. 基本数值检查
         # -------------------------------------------------
         if span_um <= 0:
-            errors.append(f"{phase_name}跨度必须大于 0")
+            errors.append(
+                f"{phase_name}跨度必须大于 0"
+            )
 
-        if step_um <= 0:
-            errors.append(f"{phase_name}步距必须大于 0")
-
-        if step_um > 0 and span_um > 0:
-            frame_count = span_um // step_um
-
-            if frame_count < 3:
+        if requires_scan:
+            if step_um <= 0:
                 errors.append(
-                    f"{phase_name}帧数只有 {frame_count} 张，"
-                    "至少需要 3 张"
+                    f"{phase_name}步距必须大于 0"
                 )
 
-            if span_um % step_um != 0:
-                errors.append(
-                    f"{phase_name}跨度 {span_um} μm "
-                    f"不能被步距 {step_um} μm 整除"
-                )
+            if step_um > 0 and span_um > 0:
+                frame_count = span_um // step_um
+
+                if frame_count < 3:
+                    errors.append(
+                        f"{phase_name}帧数只有 "
+                        f"{frame_count} 张，"
+                        "至少需要 3 张"
+                    )
+
+                if span_um % step_um != 0:
+                    errors.append(
+                        f"{phase_name}跨度 "
+                        f"{span_um} μm "
+                        f"不能被步距 "
+                        f"{step_um} μm 整除"
+                    )
 
         # -------------------------------------------------
         # 3. PLC 行程检查
@@ -192,19 +218,89 @@ class FocusRunService:
         # 4. 搜索任务专用检查
         # -------------------------------------------------
         if cfg.action == "search":
-            if cfg.fine_step_um > cfg.coarse_step_um:
-                warnings.append(
-                    f"精扫步距 {cfg.fine_step_um} μm "
-                    f"大于粗扫步距 {cfg.coarse_step_um} μm"
+            if cfg.strategy == "ncc":
+                if cfg.fine_step_um > cfg.coarse_step_um:
+                    warnings.append(
+                        f"精扫步距 {cfg.fine_step_um} μm "
+                        f"大于粗扫步距 "
+                        f"{cfg.coarse_step_um} μm"
+                    )
+
+                self._validate_template(
+                    cfg.template,
+                    errors,
+                    warnings,
                 )
 
-            self._validate_template(
-                cfg.template,
-                errors,
-                warnings,
-            )
+            elif cfg.strategy == "dl":
+                self._validate_dl_config(
+                    cfg,
+                    errors,
+                    warnings,
+                )
+
+            else:
+                errors.append(
+                    f"不支持的搜索策略: {cfg.strategy}"
+                )
 
         return errors, warnings
+
+    @staticmethod
+    def _validate_dl_config(
+            cfg,
+            errors,
+            warnings,
+    ):
+        """检查 AI 单帧对焦所需的静态参数。"""
+
+        if not cfg.dl_model:
+            errors.append("AI 对焦前必须选择模型文件")
+
+        elif not os.path.isfile(cfg.dl_model):
+            errors.append(
+                f"AI 对焦模型不存在: {cfg.dl_model}"
+            )
+
+        if cfg.shot_position_um is None:
+            errors.append(
+                "AI 对焦前必须设置单帧拍摄位置"
+            )
+            return
+
+        search_end_um = (
+            cfg.search_start_um
+            + cfg.search_span_um
+        )
+
+        if not (
+                cfg.search_start_um
+                <= cfg.shot_position_um
+                <= search_end_um
+        ):
+            errors.append(
+                f"AI 拍摄位置 "
+                f"{cfg.shot_position_um} μm "
+                f"不在搜索范围 "
+                f"{cfg.search_start_um}～"
+                f"{search_end_um} μm 内"
+            )
+
+        if cfg.dl_max_abs_delta_um <= 0:
+            errors.append(
+                "AI 最大预测偏移必须大于 0"
+            )
+
+        elif (
+                cfg.dl_max_abs_delta_um
+                > cfg.search_span_um
+        ):
+            warnings.append(
+                f"AI 最大预测偏移 "
+                f"{cfg.dl_max_abs_delta_um:g} μm "
+                f"大于搜索跨度 "
+                f"{cfg.search_span_um} μm"
+            )
 
     @staticmethod
     def _validate_template(template_path, errors, warnings):

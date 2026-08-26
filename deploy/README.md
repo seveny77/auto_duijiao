@@ -26,6 +26,16 @@ powershell -ExecutionPolicy Bypass -File deploy\bootstrap_runtime.ps1 -SkipGit
 ```powershell
 conda env create -f deploy\environment.yml
 conda run -n autofocus python -m pip install -r deploy\requirements-runtime.txt
+conda run -n autofocus python -m pip install -r deploy\requirements-torch-cu128.txt
+```
+
+普通依赖和 CUDA 依赖必须分开安装，避免 pip 用 PyTorch 索引查询
+PyQt5、OpenCV 等普通包。
+
+如果工控机不能访问 Anaconda 仓库，可以离线克隆 base：
+
+```powershell
+conda create --offline --yes --name autofocus --clone base
 ```
 
 ## 运行资产

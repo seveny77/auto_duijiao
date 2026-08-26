@@ -41,6 +41,7 @@ class ConfigService:
         return {
             "action": self._panel.action_combo.currentText(),
             "mode": self._panel.mode_combo.currentText(),
+            "strategy": self._current_strategy(),
             "skip_confirm": self._panel.skip_confirm_check.isChecked(),
             "exposure_us": self._panel.exposure_spin.value(),
             "gain_db": self._panel.gain_spin.value(),
@@ -55,7 +56,13 @@ class ConfigService:
             "save_dir": self._panel.save_edit.text(),
             "template": self._panel.template_edit.text(),
             "calibrate_step_um": self._panel.calibrate_step_spin.value(),
-            "calibrate_downsample": self._panel.calibrate_ds_combo.currentText(),
+            "calibrate_downsample": (
+                self._panel.calibrate_ds_combo.currentText()
+            ),
+            "dl_model": self._panel.dl_model_edit.text(),
+            "shot_position_um": (
+                self._panel.shot_position_spin.value()
+            ),
         }
 
     def build_focus_config(self) -> FocusConfig:
@@ -63,71 +70,222 @@ class ConfigService:
 
         cfg = FocusConfig()
 
-        action_map = {"搜索对焦": "search", "图像标定": "calibrate"}
-        mode_map = {"真实": "real", "仿真": "sim"}
-        decimation_map = {"1x1": 1, "2x2": 2, "4x4": 4}
+        ncc_action_map = {
+            "NCC搜索": "search",
+            "NCC模板标定": "calibrate",
+        }
+        mode_map = {
+            "真实": "real",
+            "仿真": "sim",
+        }
+        decimation_map = {
+            "1x1": 1,
+            "2x2": 2,
+            "4x4": 4,
+        }
 
-        cfg.action = action_map[self._panel.action_combo.currentText()]
-        cfg.mode = mode_map[self._panel.mode_combo.currentText()]
-        cfg.yes = self._panel.skip_confirm_check.isChecked()
+        cfg.strategy = self._current_strategy()
 
-        template_path = self._panel.template_edit.text().strip()
-        if template_path and not os.path.isabs(template_path):
-            template_path = os.path.join(self._project_root, template_path)
+        if cfg.strategy == "dl":
+            # AI 模型已经在外部完成训练，
+            # 当前 GUI 没有 AI 标定流程。
+            cfg.action = "search"
+        else:
+            cfg.action = ncc_action_map[
+                self._panel.ncc_action_combo.currentText()
+            ]
+
+        cfg.mode = mode_map[
+            self._panel.mode_combo.currentText()
+        ]
+        cfg.yes = (
+            self._panel.skip_confirm_check.isChecked()
+        )
+
+        template_path = (
+            self._panel.template_edit.text().strip()
+        )
+        if (
+                template_path
+                and not os.path.isabs(template_path)
+        ):
+            template_path = os.path.join(
+                self._project_root,
+                template_path,
+            )
+
+        dl_model_path = (
+            self._panel.dl_model_edit.text().strip()
+        )
+        if (
+                dl_model_path
+                and not os.path.isabs(dl_model_path)
+        ):
+            dl_model_path = os.path.join(
+                self._project_root,
+                dl_model_path,
+            )
 
         cfg.template = template_path
-        cfg.plc_host = self._panel.plc_ip_edit.text().strip()
-        cfg.plc_port = self._panel.plc_port_spin.value()
-        cfg.exposure_us = self._panel.exposure_spin.value()
-        cfg.gain_db = self._panel.gain_spin.value()
+        cfg.dl_model = dl_model_path
+        cfg.shot_position_um = (
+            self._panel.shot_position_spin.value()
+        )
+
+        cfg.plc_host = (
+            self._panel.plc_ip_edit.text().strip()
+        )
+        cfg.plc_port = (
+            self._panel.plc_port_spin.value()
+        )
+        cfg.exposure_us = (
+            self._panel.exposure_spin.value()
+        )
+        cfg.gain_db = (
+            self._panel.gain_spin.value()
+        )
         cfg.coarse_binning = decimation_map[
             self._panel.decimation_combo.currentText()
         ]
         cfg.coarse_downsample = "decimation"
-        cfg.coarse_step_um = self._panel.coarse_step_spin.value()
-        cfg.fine_step_um = self._panel.fine_step_spin.value()
-        cfg.fine_half_steps = self._panel.fine_half_spin.value()
-        cfg.search_start_um = self._panel.search_start_spin.value()
-        cfg.search_span_um = self._panel.search_span_spin.value()
-        cfg.save_images = self._panel.save_edit.text().strip() or None
-        cfg.calibrate_step_um = self._panel.calibrate_step_spin.value()
+        cfg.coarse_step_um = (
+            self._panel.coarse_step_spin.value()
+        )
+        cfg.fine_step_um = (
+            self._panel.fine_step_spin.value()
+        )
+        cfg.fine_half_steps = (
+            self._panel.fine_half_spin.value()
+        )
+        cfg.search_start_um = (
+            self._panel.search_start_spin.value()
+        )
+        cfg.search_span_um = (
+            self._panel.search_span_spin.value()
+        )
+        cfg.save_images = (
+                self._panel.save_edit.text().strip()
+                or None
+        )
+        cfg.calibrate_step_um = (
+            self._panel.calibrate_step_spin.value()
+        )
 
-        calibrate_parts = self._panel.calibrate_ds_combo.currentText().split()
+        calibrate_parts = (
+            self._panel.calibrate_ds_combo
+            .currentText()
+            .split()
+        )
         cfg.calibrate_downsample = calibrate_parts[0]
-        cfg.calibrate_factor = int(calibrate_parts[1])
+        cfg.calibrate_factor = int(
+            calibrate_parts[1]
+        )
+
         return cfg
 
     def apply(self, cfg: dict):
         """把配置字典恢复到参数面板。"""
 
         mode = cfg.get("mode", "真实")
-        mode = {"real": "真实", "sim": "仿真"}.get(mode, mode)
+        mode = {
+            "real": "真实",
+            "sim": "仿真",
+        }.get(mode, mode)
 
-        action = cfg.get("action", "搜索对焦")
-        action = {"离线标定": "图像标定"}.get(action, action)
+        action = cfg.get(
+            "action",
+            "搜索对焦",
+        )
+        action = {
+            "search": "搜索对焦",
+            "calibrate": "图像标定",
+            "离线标定": "图像标定",
+        }.get(action, action)
 
-        self._panel.action_combo.setCurrentText(action)
-        self._panel.mode_combo.setCurrentText(mode)
-        self._panel.skip_confirm_check.setChecked(cfg.get("skip_confirm", True))
-        self._panel.exposure_spin.setValue(cfg.get("exposure_us", 3000))
-        self._panel.gain_spin.setValue(cfg.get("gain_db", 0.0))
-        self._panel.decimation_combo.setCurrentText(cfg.get("decimation", "2x2"))
-        self._panel.plc_ip_edit.setText(cfg.get("plc_host", "192.168.100.88"))
-        self._panel.plc_port_spin.setValue(cfg.get("plc_port", 502))
-        self._panel.search_start_spin.setValue(cfg.get("search_start_um", 9500))
-        self._panel.search_span_spin.setValue(cfg.get("search_span_um", 2000))
-        self._panel.fine_step_spin.setValue(cfg.get("fine_step_um", 5))
-        self._panel.fine_half_spin.setValue(cfg.get("fine_half_steps", 5))
-        self._panel.coarse_step_spin.setValue(cfg.get("coarse_step_um", 100))
-        self._panel.save_edit.setText(cfg.get("save_dir", ""))
+        strategy = cfg.get(
+            "strategy",
+            "ncc",
+        )
+
+        self._panel.action_combo.setCurrentText(
+            action
+        )
+        self._panel.mode_combo.setCurrentText(
+            mode
+        )
+
+        if strategy == "dl":
+            strategy_tab_index = (
+                self._panel.ai_tab_index
+            )
+        else:
+            strategy_tab_index = (
+                self._panel.ncc_tab_index
+            )
+
+        self._panel.strategy_tabs.setCurrentIndex(
+            strategy_tab_index
+        )
+
+        self._panel.skip_confirm_check.setChecked(
+            cfg.get("skip_confirm", True)
+        )
+        self._panel.exposure_spin.setValue(
+            cfg.get("exposure_us", 3000)
+        )
+        self._panel.gain_spin.setValue(
+            cfg.get("gain_db", 0.0)
+        )
+        self._panel.decimation_combo.setCurrentText(
+            cfg.get("decimation", "2x2")
+        )
+        self._panel.plc_ip_edit.setText(
+            cfg.get("plc_host", "192.168.100.88")
+        )
+        self._panel.plc_port_spin.setValue(
+            cfg.get("plc_port", 502)
+        )
+        self._panel.search_start_spin.setValue(
+            cfg.get("search_start_um", 9500)
+        )
+        self._panel.search_span_spin.setValue(
+            cfg.get("search_span_um", 2000)
+        )
+        self._panel.fine_step_spin.setValue(
+            cfg.get("fine_step_um", 5)
+        )
+        self._panel.fine_half_spin.setValue(
+            cfg.get("fine_half_steps", 5)
+        )
+        self._panel.coarse_step_spin.setValue(
+            cfg.get("coarse_step_um", 100)
+        )
+        self._panel.save_edit.setText(
+            cfg.get("save_dir", "")
+        )
         self._panel.template_edit.setText(
-            cfg.get("template", "data/template_sim.json")
+            cfg.get(
+                "template",
+                "data/template_sim.json",
+            )
         )
         self._panel.calibrate_step_spin.setValue(
             cfg.get("calibrate_step_um", 20)
         )
         self._panel.calibrate_ds_combo.setCurrentText(
-            cfg.get("calibrate_downsample", "decimation 4")
+            cfg.get(
+                "calibrate_downsample",
+                "decimation 4",
+            )
+        )
+        self._panel.dl_model_edit.setText(
+            cfg.get(
+                "dl_model",
+                "assets/models/ai/best_resnet.pt",
+            )
+        )
+        self._panel.shot_position_spin.setValue(
+            cfg.get("shot_position_um", 12000)
         )
 
     def save(self) -> bool:
