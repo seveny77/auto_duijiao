@@ -183,7 +183,7 @@ class PhaseCollector:
                 if self._dropped > 0:
                     return False
 
-                # 已经处理到 PLC 返回的目标数量。
+                # 已经处理到E4O4返回的目标触发数。
                 if self._processed >= count:
                     return True
 

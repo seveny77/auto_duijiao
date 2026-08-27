@@ -24,9 +24,9 @@ class PeakPrediction:
 class SearchContext:
     """策略的采图环境：只暴露能力，不暴露细节。"""
 
-    def __init__(self, cam, plc, evaluator, cfg, template):
+    def __init__(self, cam, motion, evaluator, cfg, template):
         self._cam = cam
-        self._plc = plc
+        self._motion = motion
         self._eval = evaluator
         self.cfg = cfg
         self.template = template
@@ -41,7 +41,7 @@ class SearchContext:
         from backend.collector import save_phase_images
         from backend.pipeline import run_phase
 
-        # PLC 飞拍约定为“含终点、不含起点”时，
+        # E4O4飞拍约定为“含终点、不含起点”，
         # 帧数等于扫描跨度除以步距。
         n = (end_um - start_um) // step_um
 
@@ -49,7 +49,7 @@ class SearchContext:
         # save_all=True 时，PhaseCollector 在评价每帧后立即保存：
         # img_0000.jpg、img_0001.jpg……
         col, count, _ = run_phase(
-            self._plc,
+            self._motion,
             self._cam,
             self._eval,
             start_um,

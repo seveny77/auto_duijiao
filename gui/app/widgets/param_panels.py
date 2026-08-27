@@ -13,7 +13,7 @@ class ParamPanel(QWidget):
         self.setFixedWidth(320)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._build_plc_group())
+        layout.addWidget(self._build_motion_group())
         layout.addWidget(self._build_camera_group())
         layout.addWidget(self._build_flow_group())
         layout.addWidget(self._build_search_group())
@@ -84,20 +84,38 @@ class ParamPanel(QWidget):
                 and self.ncc_action_combo.currentText() != ncc_action
         ):
             self.ncc_action_combo.setCurrentText(ncc_action)
-    # ---------- PLC 参数 ----------
-    def _build_plc_group(self) -> QGroupBox:
-        group = QGroupBox("PLC 参数")
+    # ---------- 运动控制器 ----------
+    def _build_motion_group(self) -> QGroupBox:
+        group = QGroupBox("运动控制器")
         form = QFormLayout(group)
-        self.plc_ip_edit = QLineEdit("192.168.100.88")
-        self.plc_port_spin = QSpinBox()
-        self.plc_port_spin.setRange(1, 65535)
-        self.plc_port_spin.setValue(502)
-        self.plc_connect_btn = QPushButton("PLC连接测试")
-        self.plc_stroke_label = QLabel("未连接")
-        form.addRow("IP 地址:", self.plc_ip_edit)
-        form.addRow("端口:", self.plc_port_spin)
-        form.addRow(self.plc_connect_btn)
-        form.addRow("行程范围:", self.plc_stroke_label)
+        self.motion_device_label = QLabel("M60 + E4O4")
+        self.motion_connect_btn = QPushButton("连接运动控制器")
+        self.motion_reset_btn = QPushButton("复位报警")
+        self.motion_servo_btn = QPushButton("伺服使能")
+        self.motion_home_btn = QPushButton("回原点")
+        self.motion_stop_btn = QPushButton("停止运动")
+        self.motion_connection_label = QLabel("未连接")
+        self.motion_servo_label = QLabel("未使能")
+        self.motion_home_label = QLabel("未回零")
+        self.motion_axis_label = QLabel("未连接")
+        self.motion_position_label = QLabel("--")
+        self.motion_stroke_label = QLabel("未连接")
+        maintenance_row = QHBoxLayout()
+        maintenance_row.addWidget(self.motion_reset_btn)
+        maintenance_row.addWidget(self.motion_servo_btn)
+        motion_row = QHBoxLayout()
+        motion_row.addWidget(self.motion_home_btn)
+        motion_row.addWidget(self.motion_stop_btn)
+        form.addRow("控制器:", self.motion_device_label)
+        form.addRow("连接状态:", self.motion_connection_label)
+        form.addRow("伺服状态:", self.motion_servo_label)
+        form.addRow("回零状态:", self.motion_home_label)
+        form.addRow("轴状态:", self.motion_axis_label)
+        form.addRow("当前位置:", self.motion_position_label)
+        form.addRow(self.motion_connect_btn)
+        form.addRow(maintenance_row)
+        form.addRow(motion_row)
+        form.addRow("行程范围:", self.motion_stroke_label)
         return group
 
     # ---------- 相机参数 ----------
@@ -242,7 +260,7 @@ class ParamPanel(QWidget):
         self.shot_position_spin.setValue(12000)
         self.shot_position_spin.setSuffix(" µm")
         self.shot_position_spin.setToolTip(
-            "AI拍摄输入图时，PLC工艺必须保证丝杆位于这个物理位置"
+            "AI拍摄输入图时，轴卡将在这个物理位置完成单点飞拍"
         )
 
         self.dl_model_edit = QLineEdit(
@@ -430,9 +448,11 @@ class ParamPanel(QWidget):
             self.exposure_spin,
             self.gain_spin,
             self.decimation_combo,
-            self.plc_ip_edit,
-            self.plc_port_spin,
-            self.plc_connect_btn,
+            self.motion_connect_btn,
+            self.motion_reset_btn,
+            self.motion_servo_btn,
+            self.motion_home_btn,
+            self.motion_stop_btn,
             self.search_start_spin,
             self.search_span_spin,
             self.fine_step_spin,

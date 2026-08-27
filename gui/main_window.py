@@ -13,7 +13,7 @@ from gui.app.services.config_service import ConfigService
 from gui.app.services.controller import AppController
 from gui.app.services.ct_logger import CtLogger
 from gui.app.services.result_presenter import ResultPresenter
-from gui.app.services.plc_service import PlcService
+from gui.app.services.motion_service import MotionService
 from gui.app.services.live_view_service import LiveViewService
 from gui.app.services.focus_task_service import FocusTaskService
 from gui.app.services.focus_run_service import FocusRunService
@@ -86,12 +86,6 @@ class MainWindow(QMainWindow):
                 self.param_panel.template_edit.text().strip()
             ),
         )
-        self.plc_service = PlcService(
-            connect_btn=self.param_panel.plc_connect_btn,
-            stroke_label=self.param_panel.plc_stroke_label,
-            status_fn=self.status_message.emit,
-        )
-
         self.focus_task_service = FocusTaskService()
 
         self.detection_model_service = DetectionModelService(
@@ -112,6 +106,20 @@ class MainWindow(QMainWindow):
             project_root=PROJECT_ROOT,
         )
         self.config_service.load()
+        self.motion_service = MotionService(
+            connect_btn=self.param_panel.motion_connect_btn,
+            stroke_label=self.param_panel.motion_stroke_label,
+            status_fn=self.status_message.emit,
+            reset_btn=self.param_panel.motion_reset_btn,
+            servo_btn=self.param_panel.motion_servo_btn,
+            home_btn=self.param_panel.motion_home_btn,
+            stop_btn=self.param_panel.motion_stop_btn,
+            connection_label=self.param_panel.motion_connection_label,
+            servo_label=self.param_panel.motion_servo_label,
+            home_label=self.param_panel.motion_home_label,
+            axis_label=self.param_panel.motion_axis_label,
+            position_label=self.param_panel.motion_position_label,
+        )
         self.focus_run_service = FocusRunService(
             config_service=self.config_service,
             controller=self.controller,
@@ -119,7 +127,9 @@ class MainWindow(QMainWindow):
             live_view_service=self.live_view_service,
             result_presenter=self.result_presenter,
             detection_model_service=self.detection_model_service,
-            stroke_range_fn=lambda: self.plc_service.stroke_range,
+            stroke_range_fn=lambda: self.motion_service.stroke_range,
+            motion_backend_fn=lambda: self.motion_service.backend,
+            motion_state_fn=lambda: self.motion_service.state,
             confirm_fn=self._confirm_motion,
             status_fn=self.status_message.emit,
         )
@@ -127,7 +137,7 @@ class MainWindow(QMainWindow):
             config_service=self.config_service,
             live_view_service=self.live_view_service,
             focus_task_service=self.focus_task_service,
-            plc_service=self.plc_service,
+            motion_service=self.motion_service,
             controller=self.controller,
             message_fn=self._log,
             status_fn=self.status_message.emit,
@@ -143,7 +153,21 @@ class MainWindow(QMainWindow):
     # ===================================================
     def _connect_signals(self):
         self.status_message.connect(self._show_status) #更新状态栏
-        self.param_panel.plc_connect_btn.clicked.connect(self._on_plc_connect) #plc连接
+        self.param_panel.motion_connect_btn.clicked.connect(
+            self._on_motion_connect
+        )
+        self.param_panel.motion_reset_btn.clicked.connect(
+            lambda _checked=False: self.motion_service.clear_alarm()
+        )
+        self.param_panel.motion_servo_btn.clicked.connect(
+            self._on_motion_servo
+        )
+        self.param_panel.motion_home_btn.clicked.connect(
+            self._on_motion_home
+        )
+        self.param_panel.motion_stop_btn.clicked.connect(
+            lambda _checked=False: self.motion_service.stop_motion()
+        )
         self.param_panel.template_load_btn.clicked.connect(
             lambda _checked=False: self.result_presenter.load_template()
         )
@@ -154,10 +178,10 @@ class MainWindow(QMainWindow):
         self.param_panel.stop_btn.clicked.connect(self.controller.request_cancel) #停止
 
         self.focus_task_service.finished.connect(
-            self.result_presenter.handle_finished
+            self._on_focus_finished
         )
         self.focus_task_service.error.connect(
-            self.result_presenter.handle_error
+            self._on_focus_error
         )
         self.focus_task_service.preview.connect(
             self.result_presenter.present_preview
@@ -172,6 +196,20 @@ class MainWindow(QMainWindow):
     def _show_status(self, text: str):
         self.statusBar().showMessage(text)
 
+    def _on_focus_finished(self, result):
+        """展示结果，并刷新任务结束后的轴位置和伺服状态。"""
+
+        self.result_presenter.handle_finished(result)
+        if self.motion_service.backend is not None:
+            self.motion_service.refresh_state()
+
+    def _on_focus_error(self, error_text: str):
+        """展示后台异常，并刷新运动控制器安全状态。"""
+
+        self.result_presenter.handle_error(error_text)
+        if self.motion_service.backend is not None:
+            self.motion_service.refresh_state()
+
     def _confirm_motion(self, message: str) -> bool:
         """显示真实运动确认框，返回用户是否同意继续。"""
 
@@ -185,11 +223,65 @@ class MainWindow(QMainWindow):
 
         return answer == QMessageBox.Yes
 
-    def _on_plc_connect(self):
-        """把用户的连接或断开请求交给 PlcService。"""
-        host = self.param_panel.plc_ip_edit.text().strip()
-        port = self.param_panel.plc_port_spin.value()
-        self.plc_service.toggle(host, port)
+    def _on_motion_connect(self):
+        """把用户的连接或断开请求交给MotionService。"""
+
+        try:
+            config = self.config_service.build_motion_config()
+        except Exception as error:
+            logger.exception("构造运动控制器配置失败")
+            self.status_message.emit("运动控制器配置错误")
+            QMessageBox.critical(
+                self,
+                "运动控制器配置错误",
+                str(error),
+            )
+            return
+
+        self.motion_service.toggle(config)
+
+    def _on_motion_servo(self):
+        """手动使能前二次确认；去使能直接执行。"""
+
+        state = self.motion_service.state
+        if state.servo_enabled:
+            self.motion_service.toggle_servo()
+            return
+        position = (
+            "--"
+            if state.position_um is None
+            else f"{state.position_um:.2f} µm"
+        )
+        if self._confirm_motion(
+            "即将手动使能直线电机。\n\n"
+            f"当前位置: {position}\n"
+            f"轴状态: {state.message}\n\n"
+            "请确认机械区域安全，是否继续？"
+        ):
+            self.motion_service.toggle_servo()
+
+    def _on_motion_home(self):
+        """展示已验证参数并二次确认真实回零。"""
+
+        state = self.motion_service.state
+        config = self.motion_service.config
+        if config is None:
+            return
+        position = (
+            "--"
+            if state.position_um is None
+            else f"{state.position_um:.2f} µm"
+        )
+        message = (
+            "即将执行真实回原点，程序将自动使能。\n\n"
+            f"当前位置: {position}\n"
+            "回零参数: 使用驱动器当前保存值（开始回零时读取）\n"
+            "程序不会自动修改驱动器回零参数\n"
+            f"超时: {config.home_timeout_s:g} s\n\n"
+            "请确认急停可用且机械区域无人，是否继续？"
+        )
+        if self._confirm_motion(message):
+            self.motion_service.home()
 
     # ===================================================
     # 总体布局

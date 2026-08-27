@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 
 class CtLogger:
     LABELS = {
-        "plc_connect_ms": "PLC连接",
         "camera_setup_ms": "相机设置",
         "coarse_ms": "粗扫",
         "ncc_ms": "NCC预测",

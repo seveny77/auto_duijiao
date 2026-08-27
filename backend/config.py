@@ -31,8 +31,6 @@ class FocusConfig:
     shot_position_um: Optional[int] = None
     dl_max_abs_delta_um: float = 600.0
 
-    plc_host: str = "192.168.100.88"
-    plc_port: int = 502
     camera_index: int = 0
 
     search_start_um: int = 9500
@@ -70,6 +68,9 @@ class FocusConfig:
     cancel_event: Optional[object] = None      # 运行期注入：停止开关
     detect_model_obj: Optional[object] = None  # 运行期注入：已加载的 YOLO
     dl_model_obj: Optional[object] = None      # 运行期注入：已经加载和预热的AI对焦模型。
+    # 运行期注入：GUI的MotionService持有已连接的运动后端。
+    # Pipeline只借用它执行本轮任务，不负责连接或断开。
+    motion_backend: Optional[object] = None
     # CLI 或无界面运行时保持 None，不产生任何预览开销。
     # image, phase, sequence, score
     preview_callback: Optional[PreviewCallback] = None

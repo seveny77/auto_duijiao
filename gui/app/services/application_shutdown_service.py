@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class ApplicationShutdownService(QObject):
-    """按安全顺序协调GUI、任务线程、PLC和相机资源关闭。"""
+    """按安全顺序协调GUI、任务线程、运动后端和相机关闭。"""
 
     # 某个异步资源结束后，请求MainWindow重新触发close()。
     retry_requested = pyqtSignal()
@@ -20,7 +20,7 @@ class ApplicationShutdownService(QObject):
         config_service,
         live_view_service,
         focus_task_service,
-        plc_service,
+        motion_service,
         controller,
         message_fn,
         status_fn,
@@ -30,7 +30,7 @@ class ApplicationShutdownService(QObject):
         self._config_service = config_service
         self._live_view_service = live_view_service
         self._focus_task_service = focus_task_service
-        self._plc_service = plc_service
+        self._motion_service = motion_service
         self._controller = controller
         self._message_fn = message_fn
         self._status_fn = status_fn
@@ -52,7 +52,7 @@ class ApplicationShutdownService(QObject):
             self._on_dependency_settled,
             Qt.QueuedConnection,
         )
-        self._plc_service.settled.connect(
+        self._motion_service.settled.connect(
             self._on_dependency_settled,
             Qt.QueuedConnection,
         )
@@ -112,12 +112,12 @@ class ApplicationShutdownService(QObject):
             )
             return False
 
-        # 第四步：等待PLC连接线程并释放PLC。
-        if not self._plc_service.shutdown():
+        # 第四步：等待轴卡连接线程，再安全释放运动后端。
+        if not self._motion_service.shutdown():
             self._defer(
-                "[提示] PLC连接线程尚未完全停止，"
+                "[提示] 运动控制器连接线程尚未完全停止，"
                 "连接任务结束后窗口将自动关闭",
-                "正在停止PLC连接任务，完成后将自动关闭",
+                "正在停止运动控制器连接任务，完成后将自动关闭",
             )
             return False
 

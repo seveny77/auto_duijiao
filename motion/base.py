@@ -30,6 +30,14 @@ class MotionBackend(ABC):
         """返回运动控制设备当前是否已经连接。"""
 
     @abstractmethod
+    def prepare_new_task(self) -> None:
+        """准备开始一轮全新的搜索或标定任务。
+
+        该方法只允许清除上一轮遗留的取消状态，不得使能、运动，
+        也不得改变当前连接的回零状态。
+        """
+
+    @abstractmethod
     def read_stroke_range(self) -> Tuple[int, int]:
         """读取软件允许行程。
 
@@ -44,6 +52,8 @@ class MotionBackend(ABC):
         end_um: int,
         step_um: int,
         timeout_s: float,
+        cancel_event=None,
+        phase_name: str = "",
     ) -> int:
         """执行等间距飞拍。
 
@@ -75,6 +85,7 @@ class MotionBackend(ABC):
         self,
         position_um: int,
         timeout_s: float,
+        cancel_event=None,
     ) -> int:
         """在指定物理位置执行一次最终单点飞拍。
 
@@ -92,3 +103,40 @@ class MotionBackend(ABC):
             M60先移动到目标位置前的准备位置，然后以设定速度经过
             position_um；E4O4使用单点预设定比较器触发相机。
         """
+
+    @abstractmethod
+    def move_to_position(
+        self,
+        position_um: int,
+        timeout_s: float,
+        cancel_event=None,
+    ):
+        """在不配置比较器的情况下移动到指定位置并保持。"""
+
+    @abstractmethod
+    def get_state(self):
+        """返回当前运动控制状态快照。"""
+
+    @abstractmethod
+    def is_ready_for_autofocus(self) -> bool:
+        """返回当前是否允许启动真实自动对焦。"""
+
+    @abstractmethod
+    def clear_alarm(self):
+        """复位轴报警并返回新状态。"""
+
+    @abstractmethod
+    def servo_on(self):
+        """伺服使能并返回新状态。"""
+
+    @abstractmethod
+    def servo_off(self):
+        """伺服去使能并返回新状态。"""
+
+    @abstractmethod
+    def home(self, cancel_event=None, timeout_s=None):
+        """执行回零并返回新状态。"""
+
+    @abstractmethod
+    def cancel_current_motion(self) -> None:
+        """取消当前运动并进入安全停止状态。"""

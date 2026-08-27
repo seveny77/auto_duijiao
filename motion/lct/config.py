@@ -30,7 +30,7 @@ class LctMotionConfig:
     e4o4_dll_path: str
     eni_path: str
     axis_param_path: str
-    e4o4_param_path: str
+    e4o4_param_path: Optional[str] = None
 
     card_no: int = 0
     axis_no: int = 1
@@ -48,6 +48,30 @@ class LctMotionConfig:
 
     trigger_pulse_width_10ns: int = 2000
     trigger_polarity: int = 0
+
+    positioning_velocity_um_s: float = 100.0
+    scan_velocity_um_s: float = 100.0
+
+    calibrate_scan_velocity_um_s: float = 100.0
+    coarse_scan_velocity_um_s: float = 1000.0
+    fine_scan_velocity_um_s: float = 50.0
+
+    line_scan_overrun_um: float = 20.0
+    single_capture_approach_um: int = 50
+    single_capture_exit_um: int = 50
+    position_tolerance_um: float = 1.0
+
+    home_method: int = 33
+    home_offset_counts: int = 0
+    home_speed1_counts_s: int = 10000
+    home_speed2_counts_s: int = 2000
+    home_acceleration_counts_s2: int = 100000
+    home_probe_function: int = 0
+    home_position_tolerance_counts: int = 50
+    home_timeout_s: float = 900.0
+    home_poll_interval_s: float = 0.05
+
+
 
     e4o4_net_card: Optional[str] = None
 
@@ -109,6 +133,70 @@ class LctMotionConfig:
                 f"{self.trigger_polarity}"
             )
 
+        if self.positioning_velocity_um_s <= 0:
+            raise LctConfigurationError(
+                "定位速度必须大于0: "
+                f"{self.positioning_velocity_um_s}"
+            )
+        phase_velocities = {
+            "标定飞拍速度": (
+                self.calibrate_scan_velocity_um_s
+            ),
+            "粗扫飞拍速度": (
+                self.coarse_scan_velocity_um_s
+            ),
+            "精扫飞拍速度": (
+                self.fine_scan_velocity_um_s
+            ),
+        }
+
+        for name, value in phase_velocities.items():
+            if value <= 0:
+                raise LctConfigurationError(
+                    f"{name}必须大于0: {value}"
+                )
+
+        if self.scan_velocity_um_s <= 0:
+            raise LctConfigurationError(
+                f"飞拍速度必须大于0: {self.scan_velocity_um_s}"
+            )
+        if self.line_scan_overrun_um <= 0:
+            raise LctConfigurationError(
+                "线性飞拍末端越程必须大于0: "
+                f"{self.line_scan_overrun_um}"
+            )
+        if self.single_capture_approach_um <= 0:
+            raise LctConfigurationError(
+                "单点飞拍准备距离必须大于0: "
+                f"{self.single_capture_approach_um}"
+            )
+        if self.single_capture_exit_um <= 0:
+            raise LctConfigurationError(
+                "单点飞拍越过距离必须大于0: "
+                f"{self.single_capture_exit_um}"
+            )
+        if self.position_tolerance_um <= 0:
+            raise LctConfigurationError(
+                "位置容差必须大于0: "
+                f"{self.position_tolerance_um}"
+            )
+        if self.home_method < 0:
+            raise LctConfigurationError(
+                f"回零模式不能小于0: {self.home_method}"
+            )
+        if self.home_speed1_counts_s <= 0:
+            raise LctConfigurationError("回零高速必须大于0")
+        if self.home_speed2_counts_s <= 0:
+            raise LctConfigurationError("回零低速必须大于0")
+        if self.home_acceleration_counts_s2 <= 0:
+            raise LctConfigurationError("回零加速度必须大于0")
+        if self.home_position_tolerance_counts < 0:
+            raise LctConfigurationError("回零位置容差不能小于0")
+        if self.home_timeout_s <= 0:
+            raise LctConfigurationError("回零超时必须大于0")
+        if self.home_poll_interval_s <= 0:
+            raise LctConfigurationError("回零轮询周期必须大于0")
+
     @property
     def trigger_pulse_width_us(self) -> float:
         """返回以微秒为单位的触发脉宽。"""
@@ -130,6 +218,18 @@ class LctMotionConfig:
             / self.counts_per_um
         )
 
+    @property
+    def positioning_velocity_counts_s(self) -> float:
+        return self.positioning_velocity_um_s * self.counts_per_um
+
+    @property
+    def scan_velocity_counts_s(self) -> float:
+        return self.scan_velocity_um_s * self.counts_per_um
+
+    @property
+    def position_tolerance_counts(self) -> int:
+        return max(1, round(self.position_tolerance_um * self.counts_per_um))
+
     def validate_files(self) -> None:
         """确认所有SDK和参数文件都存在。
 
@@ -142,8 +242,10 @@ class LctMotionConfig:
             "E4O4 DLL": self.e4o4_dll_path,
             "M60 ENI": self.eni_path,
             "M60轴参数": self.axis_param_path,
-            "E4O4参数": self.e4o4_param_path,
         }
+
+        if self.e4o4_param_path:
+            required_files["E4O4参数"] = self.e4o4_param_path
 
         missing_files = []
 

@@ -7,3 +7,7 @@ from .base import MotionBackend
 __all__ = [
     "MotionBackend",
 ]
+from motion.state import MotionState
+
+
+__all__ = ["MotionState"]

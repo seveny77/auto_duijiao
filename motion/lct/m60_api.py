@@ -7,11 +7,13 @@ import os
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
+import time
 
 from motion.lct.errors import (
     LctLibraryLoadError,
     LctSdkCallError,
     LctStateError,
+    LctSafetyError,
 )
 
 
@@ -76,6 +78,56 @@ class M60SlaveResource:
     ao_num: int
     input_variable_num: int
     output_variable_num: int
+
+
+@dataclass(frozen=True)
+class M60AxisStatus:
+    """由M_GetSts返回的Axis状态位。"""
+
+    raw: int
+    alarm: bool
+    servo_enabled: bool
+    positive_limit: bool
+    origin: bool
+    negative_limit: bool
+    moving: bool
+    in_position: bool
+    offline: bool
+    smooth_stop: bool
+    homing_error: bool
+    homing_completed: bool
+    target_reached: bool
+
+    @classmethod
+    def from_raw(cls, raw: int) -> "M60AxisStatus":
+        raw = int(raw)
+        return cls(
+            raw=raw,
+            alarm=bool(raw & 0x02),
+            servo_enabled=bool(raw & 0x200),
+            positive_limit=bool(raw & 0x20),
+            origin=bool(raw & 0x100000),
+            negative_limit=bool(raw & 0x40),
+            moving=bool(raw & 0x400),
+            in_position=bool(raw & 0x800),
+            offline=bool(raw & 0x1000000),
+            smooth_stop=bool(raw & 0x80),
+            homing_error=bool(raw & 0x10000),
+            homing_completed=bool(raw & 0x20000),
+            target_reached=bool(raw & 0x40000),
+        )
+
+
+@dataclass(frozen=True)
+class M60HomingParameters:
+    """驱动器CiA 402回零参数。"""
+
+    method: int
+    offset: int
+    speed1: int
+    speed2: int
+    acceleration: int
+    probe_function: int
 
 class M60Api:
     """ecat_motion.dll的底层调用封装。
@@ -468,6 +520,384 @@ class M60Api:
 
         return float(position.value)
 
+    def get_emergency_stop(self) -> bool:
+        """读取M60板卡急停状态；True表示急停已触发。"""
+
+        self._require_open()
+        emergency = ctypes.c_short()
+        result = self._dll.M_GetEmg(
+            ctypes.byref(emergency),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_GetEmg", result)
+        return bool(emergency.value)
+
+    def get_axis_status(self, axis_no: int) -> M60AxisStatus:
+        """读取并解码M60轴状态。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        raw_status = ctypes.c_int()
+        result = self._dll.M_GetSts(
+            ctypes.c_short(axis_no),
+            ctypes.byref(raw_status),
+            ctypes.c_short(1),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_GetSts", result)
+        return M60AxisStatus.from_raw(raw_status.value)
+
+    def get_drive_status_word(self, axis_no: int) -> int:
+        """读取EtherCAT驱动器CiA 402状态字。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        status_word = ctypes.c_ushort()
+        result = self._dll.M_EcatStatusWord(
+            ctypes.c_short(axis_no),
+            ctypes.byref(status_word),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_EcatStatusWord", result)
+        return int(status_word.value)
+
+    def get_actual_position(self, axis_no: int) -> int:
+        """读取驱动器反馈的实际位置原始计数。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        position = ctypes.c_int()
+        result = self._dll.M_ReadActualPosition(
+            ctypes.c_short(axis_no),
+            ctypes.byref(position),
+            ctypes.c_short(1),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_ReadActualPosition", result)
+        return int(position.value)
+
+    def get_soft_limits(self, axis_no: int) -> tuple[int, int]:
+        """读取软件限位，返回(负向限位, 正向限位)原始计数。"""
+
+        self._require_ecat_connected()
+        if not self._axis_params_loaded:
+            raise LctStateError(
+                "M60轴参数尚未加载，不能读取有效软件限位"
+            )
+        self._validate_axis_no(axis_no)
+        positive = ctypes.c_int()
+        negative = ctypes.c_int()
+        result = self._dll.M_GetSoftLimit(
+            ctypes.c_short(axis_no),
+            ctypes.byref(positive),
+            ctypes.byref(negative),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_GetSoftLimit", result)
+        return int(negative.value), int(positive.value)
+
+    def clear_axis_status(self, axis_no: int) -> None:
+        """清除指定轴的报警和可清除状态位。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        result = self._dll.M_ClrSts(
+            ctypes.c_short(axis_no),
+            ctypes.c_short(1),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_ClrSts", result)
+        logger.info("M60轴状态复位完成: axis=%d", axis_no)
+
+    def get_homing_parameters(
+        self,
+        axis_no: int,
+    ) -> M60HomingParameters:
+        """读取驱动器当前回零参数，不修改驱动器。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        method = ctypes.c_short()
+        offset = ctypes.c_int()
+        speed1 = ctypes.c_uint()
+        speed2 = ctypes.c_uint()
+        acceleration = ctypes.c_uint()
+        probe_function = ctypes.c_ushort()
+        result = self._dll.M_GetHomingPrm(
+            ctypes.c_short(axis_no),
+            ctypes.byref(method),
+            ctypes.byref(offset),
+            ctypes.byref(speed1),
+            ctypes.byref(speed2),
+            ctypes.byref(acceleration),
+            ctypes.byref(probe_function),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_GetHomingPrm", result)
+        return M60HomingParameters(
+            method=int(method.value),
+            offset=int(offset.value),
+            speed1=int(speed1.value),
+            speed2=int(speed2.value),
+            acceleration=int(acceleration.value),
+            probe_function=int(probe_function.value),
+        )
+
+    def set_homing_mode(self, axis_no: int, mode: int) -> None:
+        """切换驱动器回零/位置工作模式。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        result = self._dll.M_SetHomingMode(
+            ctypes.c_short(axis_no),
+            ctypes.c_short(mode),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_SetHomingMode", result)
+        logger.info("M60工作模式已切换: axis=%d, mode=%d", axis_no, mode)
+
+    def start_homing(self, axis_no: int) -> None:
+        """启动指定轴的驱动器回零动作。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        result = self._dll.M_HomingStart(
+            ctypes.c_short(axis_no),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_HomingStart", result)
+        logger.info("M60回零已启动: axis=%d", axis_no)
+
+    def cancel_homing(self, axis_no: int) -> None:
+        """取消指定轴的回零动作。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        result = self._dll.M_HomeCancelSingleAxis(
+            ctypes.c_short(axis_no),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_HomeCancelSingleAxis", result)
+        logger.warning("M60回零取消命令已发出: axis=%d", axis_no)
+
+    def get_command_position(self, axis_no: int) -> float:
+        """读取板卡当前规划位置。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        position = ctypes.c_double()
+        result = self._dll.M_GetCmd(
+            ctypes.c_short(axis_no),
+            ctypes.byref(position),
+            ctypes.c_short(1),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_GetCmd", result)
+        return float(position.value)
+
+    def servo_on(
+        self,
+        axis_no: int,
+        timeout_s: float = 2.0,
+    ) -> None:
+        """使能指定轴，并等待状态位确认。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        if timeout_s <= 0:
+            raise ValueError(f"使能等待时间必须大于0: {timeout_s}")
+
+        status = self.get_axis_status(axis_no)
+        self._raise_if_unsafe_for_motion(axis_no, status)
+        if status.servo_enabled:
+            return
+
+        result = self._dll.M_Servo_On(
+            ctypes.c_short(axis_no),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_Servo_On", result)
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            status = self.get_axis_status(axis_no)
+            self._raise_if_unsafe_for_motion(axis_no, status)
+            if status.servo_enabled:
+                logger.info("M60轴已使能: axis=%d", axis_no)
+                return
+            time.sleep(0.02)
+
+        raise LctStateError(
+            f"M60轴使能状态确认超时: axis={axis_no}"
+        )
+
+    def servo_off(self, axis_no: int) -> None:
+        """关闭指定轴伺服使能。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        result = self._dll.M_Servo_Off(
+            ctypes.c_short(axis_no),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_Servo_Off", result)
+        logger.info("M60轴已去使能: axis=%d", axis_no)
+
+    def absolute_move(
+        self,
+        axis_no: int,
+        target_counts: int,
+        velocity_counts_s: float,
+    ) -> None:
+        """发出单轴绝对运动命令，不在本方法内等待完成。"""
+
+        self._require_ecat_connected()
+        if not self._axis_params_loaded:
+            raise LctStateError(
+                "M60轴参数尚未加载，不能执行绝对运动"
+            )
+        self._validate_axis_no(axis_no)
+        if velocity_counts_s <= 0:
+            raise ValueError(
+                f"绝对运动速度必须大于0: {velocity_counts_s}"
+            )
+
+        status = self.get_axis_status(axis_no)
+        self._raise_if_unsafe_for_motion(axis_no, status)
+        if not status.servo_enabled:
+            raise LctStateError(
+                f"M60轴尚未使能，不能运动: axis={axis_no}"
+            )
+
+        negative_limit, positive_limit = self.get_soft_limits(axis_no)
+        if not negative_limit <= target_counts <= positive_limit:
+            raise LctSafetyError(
+                "M60目标位置超出软件限位: "
+                f"axis={axis_no}, target={target_counts}, "
+                f"range=[{negative_limit}, {positive_limit}]"
+            )
+
+        result = self._dll.M_AbsMove(
+            ctypes.c_short(axis_no),
+            ctypes.c_int(target_counts),
+            ctypes.c_double(velocity_counts_s),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_AbsMove", result)
+        logger.info(
+            "M60绝对运动已启动: axis=%d, target=%d, velocity=%.3f",
+            axis_no,
+            target_counts,
+            velocity_counts_s,
+        )
+
+    def wait_motion_complete(
+        self,
+        axis_no: int,
+        target_counts: int,
+        timeout_s: float,
+        tolerance_counts: int = 100,
+        poll_interval_s: float = 0.02,
+        cancel_event=None,
+    ) -> int:
+        """监控轴直到停止并到达目标，返回最终实际位置。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        if timeout_s <= 0:
+            raise ValueError(f"运动超时时间必须大于0: {timeout_s}")
+        if tolerance_counts < 0:
+            raise ValueError(
+                f"到位容差不能小于0: {tolerance_counts}"
+            )
+        if poll_interval_s <= 0:
+            raise ValueError(
+                f"轮询周期必须大于0: {poll_interval_s}"
+            )
+
+        deadline = time.monotonic() + timeout_s
+        saw_motion = False
+        while time.monotonic() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("用户取消")
+
+            if self.get_emergency_stop():
+                raise LctSafetyError(
+                    f"M60运动期间检测到急停: axis={axis_no}"
+                )
+
+            status = self.get_axis_status(axis_no)
+            self._raise_if_unsafe_for_motion(axis_no, status)
+            actual = self.get_actual_position(axis_no)
+            saw_motion = saw_motion or status.moving
+
+            if (
+                not status.moving
+                and abs(actual - target_counts) <= tolerance_counts
+            ):
+                logger.info(
+                    "M60运动完成: axis=%d, target=%d, actual=%d, "
+                    "saw_motion=%s",
+                    axis_no,
+                    target_counts,
+                    actual,
+                    saw_motion,
+                )
+                return actual
+
+            time.sleep(poll_interval_s)
+
+        raise TimeoutError(
+            "M60运动完成等待超时: "
+            f"axis={axis_no}, target={target_counts}, "
+            f"actual={self.get_actual_position(axis_no)}"
+        )
+
+    def stop(self, axis_no: int, emergency: bool = False) -> None:
+        """停止指定轴；默认平滑停止，emergency=True使用急停减速度。"""
+
+        self._require_ecat_connected()
+        self._validate_axis_no(axis_no)
+        result = self._dll.M_StopSingleAxis(
+            ctypes.c_short(axis_no),
+            ctypes.c_int(1 if emergency else 0),
+            ctypes.c_short(self._opened_card),
+        )
+        self._check_result("M_StopSingleAxis", result)
+        logger.warning(
+            "M60轴停止命令已发出: axis=%d, emergency=%s",
+            axis_no,
+            emergency,
+        )
+
+    @staticmethod
+    def _raise_if_unsafe_for_motion(
+        axis_no: int,
+        status: M60AxisStatus,
+    ) -> None:
+        problems = []
+        if status.alarm:
+            problems.append("驱动器报警")
+        if status.positive_limit:
+            problems.append("正极限")
+        if status.negative_limit:
+            problems.append("负极限")
+        if status.offline:
+            problems.append("轴掉线")
+        if problems:
+            raise LctSafetyError(
+                f"M60轴状态不允许运动: axis={axis_no}, "
+                f"problems={','.join(problems)}, "
+                f"raw=0x{status.raw:08X}"
+            )
+
+    @staticmethod
+    def _validate_axis_no(axis_no: int) -> None:
+        if axis_no <= 0:
+            raise ValueError(
+                f"M60轴号必须大于0: {axis_no}"
+            )
+
     def open(self, card_no: int = 0) -> None:
         """打开指定M60板卡。
 
@@ -683,6 +1113,132 @@ class M60Api:
             ctypes.c_short,
         ]
         self._dll.M_GetEncPos.restype = ctypes.c_short
+
+        # short M_GetEmg(short* emg, short card)
+        self._dll.M_GetEmg.argtypes = [
+            ctypes.POINTER(ctypes.c_short),
+            ctypes.c_short,
+        ]
+        self._dll.M_GetEmg.restype = ctypes.c_short
+
+        # short M_GetSts(
+        #     short axis, int* status,
+        #     short count, short card
+        # )
+        self._dll.M_GetSts.argtypes = [
+            ctypes.c_short,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_short,
+            ctypes.c_short,
+        ]
+        self._dll.M_GetSts.restype = ctypes.c_short
+
+        # short M_EcatStatusWord(
+        #     short axis, ushort* statusword, short card
+        # )
+        self._dll.M_EcatStatusWord.argtypes = [
+            ctypes.c_short,
+            ctypes.POINTER(ctypes.c_ushort),
+            ctypes.c_short,
+        ]
+        self._dll.M_EcatStatusWord.restype = ctypes.c_short
+
+        # short M_ReadActualPosition(
+        #     short axis, int* position,
+        #     short count, short card
+        # )
+        self._dll.M_ReadActualPosition.argtypes = [
+            ctypes.c_short,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_short,
+            ctypes.c_short,
+        ]
+        self._dll.M_ReadActualPosition.restype = ctypes.c_short
+
+        # short M_GetSoftLimit(
+        #     short axis, int* positive,
+        #     int* negative, short card
+        # )
+        self._dll.M_GetSoftLimit.argtypes = [
+            ctypes.c_short,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_short,
+        ]
+        self._dll.M_GetSoftLimit.restype = ctypes.c_short
+
+        self._dll.M_ClrSts.argtypes = [
+            ctypes.c_short,
+            ctypes.c_short,
+            ctypes.c_short,
+        ]
+        self._dll.M_ClrSts.restype = ctypes.c_short
+
+        self._dll.M_GetHomingPrm.argtypes = [
+            ctypes.c_short,
+            ctypes.POINTER(ctypes.c_short),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_ushort),
+            ctypes.c_short,
+        ]
+        self._dll.M_GetHomingPrm.restype = ctypes.c_short
+
+        self._dll.M_SetHomingMode.argtypes = [
+            ctypes.c_short,
+            ctypes.c_short,
+            ctypes.c_short,
+        ]
+        self._dll.M_SetHomingMode.restype = ctypes.c_short
+
+        self._dll.M_HomingStart.argtypes = [
+            ctypes.c_short,
+            ctypes.c_short,
+        ]
+        self._dll.M_HomingStart.restype = ctypes.c_short
+
+        self._dll.M_HomeCancelSingleAxis.argtypes = [
+            ctypes.c_short,
+            ctypes.c_short,
+        ]
+        self._dll.M_HomeCancelSingleAxis.restype = ctypes.c_short
+
+        self._dll.M_GetCmd.argtypes = [
+            ctypes.c_short,
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.c_short,
+            ctypes.c_short,
+        ]
+        self._dll.M_GetCmd.restype = ctypes.c_short
+
+        self._dll.M_Servo_On.argtypes = [
+            ctypes.c_short,
+            ctypes.c_short,
+        ]
+        self._dll.M_Servo_On.restype = ctypes.c_short
+
+        self._dll.M_Servo_Off.argtypes = [
+            ctypes.c_short,
+            ctypes.c_short,
+        ]
+        self._dll.M_Servo_Off.restype = ctypes.c_short
+
+        self._dll.M_AbsMove.argtypes = [
+            ctypes.c_short,
+            ctypes.c_int,
+            ctypes.c_double,
+            ctypes.c_short,
+        ]
+        self._dll.M_AbsMove.restype = ctypes.c_short
+
+        self._dll.M_StopSingleAxis.argtypes = [
+            ctypes.c_short,
+            ctypes.c_int,
+            ctypes.c_short,
+        ]
+        self._dll.M_StopSingleAxis.restype = ctypes.c_short
 
     def _require_loaded(self) -> None:
         """确认M60 DLL已经加载。"""

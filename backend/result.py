@@ -14,7 +14,7 @@ class SearchResult:
     ncc_max: float = 0.0
     quality: str = ""
     fine_best: int = -1
-    move_index: int = -1
+    final_position_um: float = 0.0
     fine_best_image: Optional[object] = None
     final_image: Optional[object] = None
     coarse_points: list = field(default_factory=list)

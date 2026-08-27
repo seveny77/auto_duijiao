@@ -170,7 +170,7 @@ class ResultPresenter:
         self._message_fn(
             f"预测峰={result.predicted_peak_um}µm  "
             f"quality={result.quality}  "
-            f"定拍 index={result.move_index}"
+            f"最终位置={result.final_position_um:g}µm"
         )
         self._ct_logger.log(result.ct_ms)
 
@@ -194,7 +194,7 @@ class ResultPresenter:
                 f"精扫最佳帧 index={result.fine_best}",
             )
 
-        self._status_fn("搜索完成")
+        self._status_fn("搜索完成，已保持在最终清晰位置")
 
     def _show_final_image(self, result):
         """在定拍全幅图上绘制 ROI 后显示。"""
@@ -244,7 +244,7 @@ class ResultPresenter:
         except Exception:
             logger.exception("标定曲线绘制失败: %s", path)
 
-        self._status_fn("标定完成")
+        self._status_fn("标定完成，轴保持在标定结束位置")
 
     def _plot_template_curve(self, path: str):
         """从保存后的模板文件中恢复并绘制标定曲线。"""

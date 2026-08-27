@@ -15,14 +15,35 @@ from motion.lct.errors import (
 )
 from motion.lct.m60_api import (
     M60Api,
+    M60AxisStatus,
+    M60HomingParameters,
     M60SlaveResource,
 )
+from motion.lct.backend import LctMotionBackend
+from motion.lct.e4o4_api import (
+    E4O4Api,
+    E4O4EncoderConfig,
+    E4O4LineCompareConfig,
+    E4O4PreCompareConfig,
+    E4O4SlaveResource,
+    E4O4TriggerConfig,
+)
+from motion.state import MotionState
 
 
 __all__ = [
     "LctMotionConfig",
+    "LctMotionBackend",
     "ScanDirection",
+    "E4O4Api",
+    "E4O4EncoderConfig",
+    "E4O4LineCompareConfig",
+    "E4O4PreCompareConfig",
+    "E4O4SlaveResource",
+    "E4O4TriggerConfig",
     "M60Api",
+    "M60AxisStatus",
+    "M60HomingParameters",
     "LctError",
     "LctConfigurationError",
     "LctLibraryLoadError",
@@ -30,4 +51,5 @@ __all__ = [
     "LctStateError",
     "LctSafetyError",
     "M60SlaveResource",
+    "MotionState",
 ]

@@ -72,7 +72,7 @@ def compute_interval(
     return lo, hi, best, peak
 
 def run_phase(
-    plc,
+    motion,
     cam,
     evaluator,
     start_um: int,
@@ -90,7 +90,7 @@ def run_phase(
     preview_interval_s: float = 0.1,
     phase_name: str = "",
 ) -> Tuple[PhaseCollector, int, float]:
-    """执行一次飞拍并校验张数；返回 (collector, plc 张数, 飞拍耗时)。"""
+    """执行一次飞拍并校验张数；返回(collector, 触发数, 耗时)。"""
     collector = PhaseCollector(
         cam,
         evaluator,
@@ -107,17 +107,19 @@ def run_phase(
         # 启动相机硬件触发、注册回调，并启动图像评价线程。
         collector.start()
 
-        # 触发 PLC 飞拍，并记录 PLC 飞拍阶段耗时。
+        # M60负责运动，E4O4线性比较器按位置触发相机。
         t0 = time.perf_counter()
-        count = plc.flyscan_trigger(
+        count = motion.linear_fly_scan(
             start_um,
             end_um,
             step_um,
             timeout_s=flyscan_timeout,
+            cancel_event=cancel_event,
+            phase_name=phase_name,
         )
         dur = time.perf_counter() - t0
 
-        # PLC 飞拍返回以后，立即检查用户是否已经请求取消。
+        # 运动后端返回以后，立即检查用户是否已请求取消。
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("用户取消")
 
@@ -136,7 +138,7 @@ def run_phase(
             if stats["dropped"] > 0:
                 raise RuntimeError(
                     "图像处理队列溢出: "
-                    f"PLC={count}, "
+                    f"触发={count}, "
                     f"收到={stats['received']}, "
                     f"入队={stats['enqueued']}, "
                     f"丢弃={stats['dropped']}, "
@@ -145,7 +147,7 @@ def run_phase(
 
             raise RuntimeError(
                 "帧处理超时: "
-                f"PLC={count}, "
+                f"触发={count}, "
                 f"收到={stats['received']}, "
                 f"入队={stats['enqueued']}, "
                 f"丢弃={stats['dropped']}, "
@@ -154,7 +156,7 @@ def run_phase(
 
         # 正常路径下快速确认三次。
         #
-        # 如果 processed 一直等于 PLC 返回数量，并且队列为空，
+        # 如果processed一直等于E4O4返回的触发数，并且队列为空，
         # 说明所有帧已经完成评价，不必进入后面的完整稳定期。
         fast_ok = True
         for _ in range(3):
@@ -193,25 +195,25 @@ def run_phase(
 
         # 稳定期结束以后必须执行严格张数检查。
         #
-        # 如果处理数量比 PLC 返回数量少，说明发生了丢帧；
+        # 如果处理数量比E4O4触发数少，说明发生了丢帧；
         # 如果处理数量更多，说明可能混入了额外触发。
         if collector.processed != count:
             stats = collector.stats()
 
             raise RuntimeError(
                 "帧数不符: "
-                f"PLC={count}, "
+                f"触发={count}, "
                 f"收到={stats['received']}, "
                 f"入队={stats['enqueued']}, "
                 f"丢弃={stats['dropped']}, "
                 f"处理={stats['processed']}"
             )
 
-        # PLC 返回帧数与根据扫描参数计算出的理论帧数不一致时，
+        # E4O4返回触发数与根据扫描参数计算的理论帧数不一致时，
         # 当前先给出警告，但仍然允许调用方继续处理实际采集结果。
         if count != expected_n:
             logger.warning(
-                "PLC 返回 %d 帧，预期 %d",
+                "E4O4触发 %d 帧，预期 %d",
                 count,
                 expected_n,
             )
@@ -286,27 +288,31 @@ def run_search(cfg) -> int:
     # ── 组件选择：sim 用假硬件，real 用真硬件 ──
     sim = cfg.mode == "sim"
     sensor_size = None
+    col_f = None
+    final_col = None
     if sim:
-        from autofocus_sim import FakePlcClient, SimCamera, ScoreMapEvaluator
+        from autofocus_sim import FakeMotionBackend, SimCamera, ScoreMapEvaluator
         sim_peak_um = search_start + (n_coarse // 2) * coarse_step
-        plc = FakePlcClient(search_start, search_end, n_coarse)
+        motion = FakeMotionBackend(search_start, search_end)
         cam = SimCamera(n=n_coarse, interval_s=0.001)
         evaluator = ScoreMapEvaluator(
             build_sim_scores(n_coarse, search_start, coarse_step, sim_peak_um)
         )
     else:
-        plc = cam = None
+        motion = cfg.motion_backend
+        cam = None
 
     try:
         if not sim:
-            from plc.client import PlcClient
             from camera import HikCamera
-            plc = PlcClient(cfg.plc_host, cfg.plc_port, timeout=5.0)
+            if motion is None or not motion.is_connected():
+                raise RuntimeError(
+                    "运动控制器未连接，"
+                    "请先在GUI中连接M60 + E4O4"
+                )
+            motion.prepare_new_task()
             cam = HikCamera(cfg.camera_index)
             evaluator = OpenCVSharpnessEvaluator()
-            t0 = time.perf_counter()
-            plc.connect()
-            ct["plc_connect_ms"] = (time.perf_counter() - t0) * 1000
             t0 = time.perf_counter()
             cam.open()
             cam.set_exposure(cfg.coarse_exposure_us or cfg.exposure_us)
@@ -319,7 +325,7 @@ def run_search(cfg) -> int:
             ct["camera_setup_ms"] = (time.perf_counter() - t0) * 1000
             if not cfg.yes:
                 ans = input(
-                    "⚠️  即将触发 PLC 粗扫飞拍"
+                    "⚠️  即将触发轴卡粗扫飞拍"
                     "（Z 轴会运动），确认请输入 yes: "
                 )
 
@@ -337,7 +343,7 @@ def run_search(cfg) -> int:
         # ── ② 策略预测 ──
         ctx = SearchContext(
             cam=cam,
-            plc=plc,
+            motion=motion,
             evaluator=evaluator,
             cfg=cfg,
             template=template,
@@ -409,91 +415,117 @@ def run_search(cfg) -> int:
                 action="search",
                 error="用户取消",
             )
-        # ── ④ 精扫区间 ──
-        if (
-                quality in (
-                "mismatch",
-                "boundary",
-        )
-                and coarse_points
-        ):
-            logger.warning(
-                "quality=%s，"
-                "精扫区间降级为"
-                "粗扫峰±2×粗扫步距",
-                quality,
-            )
-            lo, hi, _, _ = compute_interval(
-                coarse_positions,
-                coarse_scores,
-                coarse_step,
-                search_start,
-                search_span,
+        # ── ④ NCC 精扫；AI 策略直接采用模型给出的最终位置 ──
+        fine_positions = []
+        fine_scores = []
+        best_f = -1
+        count_f = 0
+        if cfg.strategy == "dl":
+            final_position_um = int(round(predicted_peak_um))
+            if not sim:
+                t0 = time.perf_counter()
+                set_full_frame(cam, 1)
+                cam.set_roi(*roi)
+                cam.set_exposure(cfg.exposure_us)
+                ct["fine_switch_ms"] = (time.perf_counter() - t0) * 1000
+            logger.info(
+                "AI策略最终位置=%sµm，不执行NCC精扫",
+                final_position_um,
             )
         else:
-            lo = max(predicted_peak_um - half, search_start)
-            hi = min(predicted_peak_um + half, search_end)
-        n_fine = (hi - lo) // fine_step
-
-        # ── 切换：停流 → 开窗（sim 换成精扫专用假组件，帧数不同）──
-
-        if sim:
-            plc = FakePlcClient(lo, lo + n_fine * fine_step, n_fine)
-            cam = SimCamera(n=n_fine, interval_s=0.001)
-            evaluator = ScoreMapEvaluator(
-                build_sim_scores(n_fine, lo, fine_step, sim_peak_um)
+            if (
+                    quality in (
+                    "mismatch",
+                    "boundary",
             )
-        else:
+                    and coarse_points
+            ):
+                logger.warning(
+                    "quality=%s，精扫区间降级为粗扫峰±2×粗扫步距",
+                    quality,
+                )
+                lo, hi, _, _ = compute_interval(
+                    coarse_positions,
+                    coarse_scores,
+                    coarse_step,
+                    search_start,
+                    search_span,
+                )
+            else:
+                lo = max(predicted_peak_um - half, search_start)
+                hi = min(predicted_peak_um + half, search_end)
+            n_fine = (hi - lo) // fine_step
+
+            # 切换：停流 → 开窗（sim 换成精扫专用假组件）。
+            if sim:
+                motion = FakeMotionBackend(lo, lo + n_fine * fine_step)
+                cam = SimCamera(n=n_fine, interval_s=0.001)
+                evaluator = ScoreMapEvaluator(
+                    build_sim_scores(n_fine, lo, fine_step, sim_peak_um)
+                )
+            else:
+                t0 = time.perf_counter()
+                set_full_frame(cam, cfg.fine_binning)
+                cam.set_roi(*roi)
+                cam.set_exposure(cfg.exposure_us)
+                ct["fine_switch_ms"] = (time.perf_counter() - t0) * 1000
+
             t0 = time.perf_counter()
-            set_full_frame(cam, cfg.fine_binning)
-            cam.set_roi(*roi)
-            cam.set_exposure(cfg.exposure_us)
-            ct["fine_switch_ms"] = (time.perf_counter() - t0) * 1000
-
-        t0 = time.perf_counter()
-        col_f, count_f, dur_f = run_phase(
-            plc, cam, evaluator,
-            lo, lo + n_fine * fine_step, fine_step, n_fine,
-            save_dir=cfg.save_dir if cfg.save_all else None,
-            start_index=100,
-            flyscan_timeout=cfg.flyscan_timeout,
-            wait_timeout=cfg.frame_wait_timeout,
-            save_all=cfg.save_all,
-            cancel_event=cancel,
-            # 精扫过程预览。
-            preview_callback=cfg.preview_callback,
-            preview_interval_s=cfg.preview_interval_s,
-            phase_name="fine",
-        )
-        ct["fine_ms"] = (time.perf_counter() - t0) * 1000
-        fine_map = col_f.scores()
-        fine_scores = [fine_map.get(i) for i in range(count_f)]
-        if any(s is None for s in fine_scores):
-            raise RuntimeError("精扫缺帧")
-        best_f = max(range(count_f), key=lambda i: fine_scores[i])
-        if (
-                best_f == 0
-                or best_f == count_f - 1
-        ):
-            logger.warning(
-                "精扫最佳帧在边界（%d/%d）",
-                best_f,
-                count_f - 1,
+            col_f, count_f, dur_f = run_phase(
+                motion, cam, evaluator,
+                lo, lo + n_fine * fine_step, fine_step, n_fine,
+                save_dir=cfg.save_dir if cfg.save_all else None,
+                start_index=100,
+                flyscan_timeout=cfg.flyscan_timeout,
+                wait_timeout=cfg.frame_wait_timeout,
+                save_all=cfg.save_all,
+                cancel_event=cancel,
+                preview_callback=cfg.preview_callback,
+                preview_interval_s=cfg.preview_interval_s,
+                phase_name="fine",
             )
-        fine_positions = frame_positions(count_f, lo, fine_step)
-        if cfg.save_images:
-            save_phase_images(col_f, count_f, fine_positions, "fine", cfg.save_images)
+            ct["fine_ms"] = (time.perf_counter() - t0) * 1000
+            fine_map = col_f.scores()
+            fine_scores = [fine_map.get(i) for i in range(count_f)]
+            if any(s is None for s in fine_scores):
+                raise RuntimeError("精扫缺帧")
+            best_f = max(range(count_f), key=lambda i: fine_scores[i])
+            if best_f == 0 or best_f == count_f - 1:
+                logger.warning(
+                    "精扫最佳帧在边界（%d/%d）",
+                    best_f,
+                    count_f - 1,
+                )
+            fine_positions = frame_positions(count_f, lo, fine_step)
+            if cfg.save_images:
+                save_phase_images(
+                    col_f,
+                    count_f,
+                    fine_positions,
+                    "fine",
+                    cfg.save_images,
+                )
+            final_position_um = fine_positions[best_f]
 
-        # ── ⑤ 定拍（sim 只记 index，不采 final 图）──
+        # ── ⑤ 最佳位置单点飞拍 ──
         final_img = None
         t0 = time.perf_counter()
-        if not sim:
+        if col_f is not None:
             col_f.stop()
+        if not sim:
             set_full_frame(cam, 1)
             final_col = PhaseCollector(cam, evaluator, save_dir=cfg.save_dir, start_index=200)
             final_col.start()
-        plc.move_to_position(best_f + 1)
-        plc.process_complete()
+        final_trigger_count = motion.capture_at_position(
+            final_position_um,
+            timeout_s=cfg.flyscan_timeout,
+            cancel_event=cancel,
+        )
+        if final_trigger_count != 1:
+            raise RuntimeError(
+                "最佳位置单点飞拍触发数异常: "
+                f"{final_trigger_count}"
+            )
         if not sim:
             deadline = time.monotonic() + cfg.final_frame_timeout
             while time.monotonic() < deadline:
@@ -505,28 +537,52 @@ def run_search(cfg) -> int:
                 if cfg.save_dir and final_img is not None:
                     save_jpg(final_img, os.path.join(cfg.save_dir, "final.jpg"))
                 if cfg.save_images and final_img is not None:
-                    final_pos = lo + (best_f + 1) * fine_step
                     save_jpg(final_img,
-                             os.path.join(cfg.save_images, f"final_{final_pos:.0f}um.jpg"))
-            final_col.stop()  # ★ 补上：定拍取流结束立刻停
+                             os.path.join(cfg.save_images, f"final_{final_position_um:.0f}um.jpg"))
+            final_col.stop()
+            final_col = None
         else:
             logger.info(
-                "[sim] 定拍 PLC index=%d"
-                "（FakePlc 已记录）",
-                best_f + 1,
+                "[sim] 单点飞拍位置=%dµm",
+                final_position_um,
             )
+
+        # 单点飞拍会越过目标位置才能触发相机；取图完成后，
+        # 再无比较器地回到最终清晰位置并保持伺服。
+        hold_t0 = time.perf_counter()
+        logger.info(
+            "最终定位开始：目标=%sµm",
+            final_position_um,
+        )
+        final_state = motion.move_to_position(
+            final_position_um,
+            timeout_s=cfg.flyscan_timeout,
+            cancel_event=cancel,
+        )
+        ct["final_hold_ms"] = (time.perf_counter() - hold_t0) * 1000
+        logger.info(
+            "最终定位完成：实际=%sµm，伺服保持=%s",
+            final_state.position_um
+            if final_state is not None
+            else final_position_um,
+            getattr(final_state, "servo_enabled", True),
+        )
 
         ct["final_ms"] = (time.perf_counter() - t0) * 1000
         ct["total_ms"] = (time.perf_counter() - t_total) * 1000
 
-        logger.info(
-            "精扫: %d 帧，"
-            "最佳=%d，"
-            "定拍 PLC index=%d",
-            count_f,
-            best_f,
-            best_f + 1,
-        )
+        if cfg.strategy == "dl":
+            logger.info(
+                "AI最终位置=%dµm，已完成单点飞拍和最终定位",
+                final_position_um,
+            )
+        else:
+            logger.info(
+                "精扫: %d 帧，最佳=%d，单点飞拍位置=%dµm",
+                count_f,
+                best_f,
+                final_position_um,
+            )
         logger.info(
             "策略=%s: "
             "预测峰=%sµm  "
@@ -541,7 +597,7 @@ def run_search(cfg) -> int:
             ncc_max=ncc_max,
             quality=quality,
             fine_best=best_f,
-            move_index=best_f + 1,
+            final_position_um=final_position_um,
             fine_best_image=col_f.image(best_f) if col_f is not None else None,
             final_image=final_img,
             coarse_points=pred.coarse_points,
@@ -577,12 +633,36 @@ def run_search(cfg) -> int:
                 cfg.strategy,
             )
 
+        if motion is not None:
+            try:
+                motion.cancel_current_motion()
+            except Exception:
+                logger.exception("搜索失败后的运动安全清理失败")
+
         return SearchResult(
             rc=1,
             action="search",
             error=error_message,
         )
     finally:
+        if final_col is not None:
+            try:
+                final_col.stop()
+            except Exception as cleanup_error:
+                logger.warning(
+                    "搜索结束时停止单点采集器失败: %s",
+                    cleanup_error,
+                )
+
+        if col_f is not None:
+            try:
+                col_f.stop()
+            except Exception as cleanup_error:
+                logger.warning(
+                    "搜索结束时停止精扫采集器失败: %s",
+                    cleanup_error,
+                )
+
         if cam is not None:
             try:
                 cam.close()
@@ -593,15 +673,7 @@ def run_search(cfg) -> int:
                     cleanup_error,
                 )
 
-        if plc is not None:
-            try:
-                plc.disconnect()
-
-            except Exception as cleanup_error:
-                logger.warning(
-                    "搜索结束时断开 PLC 失败: %s",
-                    cleanup_error,
-                )
+        # 运动后端由GUI MotionService持有，不在单次任务后断开。
 
 def run_calibrate(cfg) -> int:
     cancel = cfg.cancel_event
@@ -717,20 +789,21 @@ def run_calibrate(cfg) -> int:
                 ct_ms={"eval_ms": elapsed * 1000, "template_ms": tpl_ms,
                           "total_ms": (time.perf_counter() - t_total) * 1000})
     else:  # 真机分支
-        from plc.client import PlcClient
         from camera import HikCamera
         ct = {}
         t_total = time.perf_counter()
-        plc = None
+        motion = cfg.motion_backend
         cam = None
         try:
-            plc = PlcClient(cfg.plc_host, cfg.plc_port, timeout=5.0)
+            if motion is None or not motion.is_connected():
+                raise RuntimeError(
+                    "运动控制器未连接，"
+                    "请先在GUI中连接M60 + E4O4"
+                )
+            motion.prepare_new_task()
             cam = HikCamera(cfg.camera_index)
             evaluator = OpenCVSharpnessEvaluator()
 
-            t0 = time.perf_counter()
-            plc.connect()
-            ct["plc_connect_ms"] = (time.perf_counter() - t0) * 1000
             t0 = time.perf_counter()
             cam.open()
             cam.set_exposure(cfg.coarse_exposure_us or cfg.exposure_us)  # decimation 共用曝光
@@ -742,7 +815,7 @@ def run_calibrate(cfg) -> int:
 
             if not cfg.yes:
                 ans = input(
-                    "⚠️  即将触发 PLC 全扫"
+                    "⚠️  即将触发轴卡标定全扫"
                     "（Z 轴会运动），确认请输入 yes: "
                 )
 
@@ -760,7 +833,7 @@ def run_calibrate(cfg) -> int:
             # 全扫：起点=cal_start，终点=cal_start+n_cal*step（含尾不含首）
             t0 = time.perf_counter()
             col, count, dur = run_phase(
-                plc, cam, evaluator,
+                motion, cam, evaluator,
                 cal_start, cal_start + n_cal * cal_step, cal_step, n_cal,
                 save_dir=None, start_index=0,
                 flyscan_timeout=cfg.flyscan_timeout,
@@ -835,6 +908,11 @@ def run_calibrate(cfg) -> int:
                     cfg.mode,
                 )
 
+            try:
+                motion.cancel_current_motion()
+            except Exception:
+                logger.exception("标定失败后的运动安全清理失败")
+
             return CalibrateResult(
                 rc=1,
                 action="calibrate",
@@ -851,12 +929,4 @@ def run_calibrate(cfg) -> int:
                         cleanup_error,
                     )
 
-            if plc is not None:
-                try:
-                    plc.disconnect()
-
-                except Exception as cleanup_error:
-                    logger.warning(
-                        "标定结束时断开 PLC 失败: %s",
-                        cleanup_error,
-                    )
+            # 运动后端由GUI MotionService持有，不在单次任务后断开。

@@ -11,7 +11,7 @@ from logging_config import (
 # ============================================================
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="全扫标定 + NCC 搜索 + 小区间精扫")
-    p.add_argument("--strategy", default="ncc", help="搜索策略: ncc / dummy")
+    p.add_argument("--strategy", default="ncc", help="搜索策略: ncc / dl")
     p.add_argument("--mode", choices=["real", "sim"], default="real")
     p.add_argument("--action", choices=["calibrate", "search"], default="search",
                    help="calibrate=全扫标定生成模板；search=加载模板做粗扫/NCC/精扫")
@@ -20,14 +20,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--calibrate-step-um", type=int, default=5)
     p.add_argument("--calibrate-start-um", type=int, default=None, help="默认=--search-start-um")
     p.add_argument("--calibrate-span-um", type=int, default=None, help="默认=--search-span-um")
-    p.add_argument("--calibrate-images", default=None, help="离线标定：图片目录（不连 PLC）")
+    p.add_argument("--calibrate-images", default=None, help="离线标定：图片目录（不连硬件）")
     p.add_argument("--template", default="data/template.json", help="FocusTemplate JSON 路径")# 标定模板
     # 搜索专用
     p.add_argument("--fine-half-steps", type=int, default=5, help="精扫区间 = 预测峰 ± N×fine_step")
     p.add_argument("--ncc-min-score", type=float, default=0.5, help="NCC 质量门阈值，低于则降级宽窗口")
-    # PLC链接参数
-    p.add_argument("--plc-host", default="192.168.100.88")
-    p.add_argument("--plc-port", type=int, default=502)
     p.add_argument("--camera-index", type=int, default=0)
     # 拍照位设置、步长
     p.add_argument("--search-start-um", type=int, default=9500)#起始位置

@@ -20,6 +20,8 @@ class FocusRunService:
             result_presenter,
             detection_model_service,
             stroke_range_fn,
+            motion_backend_fn,
+            motion_state_fn,
             confirm_fn,
             status_fn,
     ):
@@ -30,6 +32,8 @@ class FocusRunService:
         self._result_presenter = result_presenter
         self._detection_model_service = detection_model_service
         self._stroke_range_fn = stroke_range_fn
+        self._motion_backend_fn = motion_backend_fn
+        self._motion_state_fn = motion_state_fn
         self._confirm_fn = confirm_fn
         self._status_fn = status_fn
 
@@ -44,8 +48,11 @@ class FocusRunService:
 
         # 先收集参数，暂时不要切换界面状态。
         cfg = self._config_service.build_focus_config()
+        if cfg.mode == "real":
+            # MotionService拥有连接的生命周期；后台任务只借用它。
+            cfg.motion_backend = self._motion_backend_fn()
 
-        # 在创建后台线程、连接相机和触发 PLC 之前校验参数。
+        # 在创建后台线程、连接相机和触发运动之前校验参数。
         errors, warnings = self._validate_config(cfg)
 
         for message in warnings:
@@ -189,9 +196,38 @@ class FocusRunService:
                     )
 
         # -------------------------------------------------
-        # 3. PLC 行程检查
+        # 3. 运动控制器连接与行程检查
         # -------------------------------------------------
         stroke_range = self._stroke_range_fn()
+
+        if cfg.mode == "real":
+            motion = cfg.motion_backend
+            if motion is None:
+                errors.append("请先连接M60 + E4O4运动控制器")
+            else:
+                try:
+                    state = self._motion_state_fn()
+                except Exception as error:
+                    errors.append(
+                        f"读取运动控制器状态失败: {error}"
+                    )
+                else:
+                    if not state.connected:
+                        errors.append("运动控制器已断开，请重新连接")
+                    elif not state.homed:
+                        errors.append("本次连接尚未回原点，请先点击“回原点”")
+                    elif not state.servo_enabled:
+                        errors.append("伺服未使能，请先手动使能")
+                    elif state.alarm:
+                        errors.append("轴卡报警未清除，请先复位报警")
+                    elif state.emergency_stop:
+                        errors.append("急停信号有效，无法执行自动对焦")
+                    elif state.positive_limit or state.negative_limit:
+                        errors.append("当前处于硬限位，无法执行自动对焦")
+                    elif state.offline:
+                        errors.append("伺服轴掉线，无法执行自动对焦")
+                    elif not state.ready_for_autofocus:
+                        errors.append(state.message or "运动控制器尚未就绪")
 
         if cfg.mode == "real" and stroke_range is not None:
             stroke_min, stroke_max = stroke_range
@@ -199,18 +235,18 @@ class FocusRunService:
             if start_um < stroke_min:
                 errors.append(
                     f"{phase_name}起点 {start_um} μm "
-                    f"小于 PLC 行程最小值 {stroke_min} μm"
+                    f"小于轴卡软件限位 {stroke_min} μm"
                 )
 
             if end_um > stroke_max:
                 errors.append(
                     f"{phase_name}终点 {end_um} μm "
-                    f"大于 PLC 行程最大值 {stroke_max} μm"
+                    f"大于轴卡软件限位 {stroke_max} μm"
                 )
 
         elif cfg.mode == "real":
             warnings.append(
-                "尚未通过 GUI 读取 PLC 行程，"
+                "尚未通过GUI读取轴卡行程，"
                 "本次无法提前校验扫描范围"
             )
 
