@@ -492,17 +492,28 @@ class LctMotionBackend(MotionBackend):
             self._validate_target(logical_end_counts)
             self._validate_target(motion_end_counts)
             deadline = time.monotonic() + timeout_s
+            detail_t0 = time.perf_counter()
+            detail_ct: dict[str, float] = {}
 
             self._require_autofocus_ready()
             self._operation = "linear_fly_scan"
             try:
+                positioning_t0 = time.perf_counter()
                 self._move_to(
                     start_counts,
                     self._config.positioning_velocity_counts_s,
                     self._remaining(deadline),
                     cancel_event,
                 )
+                detail_ct["positioning_ms"] = (
+                    time.perf_counter() - positioning_t0
+                ) * 1000
+
+                coordinate_t0 = time.perf_counter()
                 m60_start, e4o4_start = self._sample_coordinate_pair()
+                detail_ct["coordinate_ms"] = (
+                    time.perf_counter() - coordinate_t0
+                ) * 1000
             except Exception:
                 self._safe_servo_off()
                 self._operation = "idle"
@@ -533,6 +544,7 @@ class LctMotionBackend(MotionBackend):
             )
             move_started = False
             try:
+                compare_config_t0 = time.perf_counter()
                 line_config = self._e4o4.configure_line_compare(
                     slave_no=self._config.e4o4_slave_no,
                     encoder_no=self._config.encoder_no,
@@ -543,10 +555,20 @@ class LctMotionBackend(MotionBackend):
                     interval=step_counts,
                     polarity=self._config.trigger_polarity,
                 )
+                detail_ct["compare_config_ms"] = (
+                    time.perf_counter() - compare_config_t0
+                ) * 1000
+
+                compare_arm_t0 = time.perf_counter()
                 self._e4o4.arm_line_compare(
                     self._config.e4o4_slave_no,
                     self._config.line_compare_no,
                 )
+                detail_ct["compare_arm_ms"] = (
+                    time.perf_counter() - compare_arm_t0
+                ) * 1000
+
+                scan_motion_t0 = time.perf_counter()
                 self._m60.absolute_move(
                     self._config.axis_no,
                     motion_end_counts,
@@ -561,6 +583,11 @@ class LctMotionBackend(MotionBackend):
                     cancel_event=cancel_event,
                 )
                 move_started = False
+                detail_ct["scan_motion_ms"] = (
+                    time.perf_counter() - scan_motion_t0
+                ) * 1000
+
+                trigger_verify_t0 = time.perf_counter()
                 time.sleep(0.05)
                 e4o4_final = self._e4o4.get_encoder_position(
                     self._config.e4o4_slave_no,
@@ -570,6 +597,9 @@ class LctMotionBackend(MotionBackend):
                     self._config.e4o4_slave_no,
                     self._config.trigger_out_no,
                 )
+                detail_ct["trigger_verify_ms"] = (
+                    time.perf_counter() - trigger_verify_t0
+                ) * 1000
                 if actual_count != line_config.expected_trigger_count:
                     raise LctStateError(
                         "E4O4线性飞拍触发数不符: "
@@ -602,10 +632,29 @@ class LctMotionBackend(MotionBackend):
                 self._safe_servo_off()
                 raise
             finally:
+                cleanup_t0 = time.perf_counter()
                 self._safe_disarm_line()
+                detail_ct["cleanup_ms"] = (
+                    time.perf_counter() - cleanup_t0
+                ) * 1000
                 if move_started:
                     self._safe_stop_axis()
                 self._operation = "idle"
+                logger.info(
+                    "LCT CT[%s] | 起点定位 %.1fms | 坐标采样 %.1fms | "
+                    "比较器配置 %.1fms | 比较器使能 %.1fms | "
+                    "扫描运动 %.1fms | 触发校验 %.1fms | "
+                    "比较器清理 %.1fms | 总计 %.1fms",
+                    phase_name or "default",
+                    detail_ct.get("positioning_ms", 0.0),
+                    detail_ct.get("coordinate_ms", 0.0),
+                    detail_ct.get("compare_config_ms", 0.0),
+                    detail_ct.get("compare_arm_ms", 0.0),
+                    detail_ct.get("scan_motion_ms", 0.0),
+                    detail_ct.get("trigger_verify_ms", 0.0),
+                    detail_ct.get("cleanup_ms", 0.0),
+                    (time.perf_counter() - detail_t0) * 1000,
+                )
 
     def capture_at_position(
         self,
@@ -634,17 +683,28 @@ class LctMotionBackend(MotionBackend):
             self._validate_target(target_counts)
             self._validate_target(finish_counts)
             deadline = time.monotonic() + timeout_s
+            detail_t0 = time.perf_counter()
+            detail_ct: dict[str, float] = {}
 
             self._require_autofocus_ready()
             self._operation = "single_capture"
             try:
+                positioning_t0 = time.perf_counter()
                 self._move_to(
                     prepare_counts,
                     self._config.positioning_velocity_counts_s,
                     self._remaining(deadline),
                     cancel_event,
                 )
+                detail_ct["positioning_ms"] = (
+                    time.perf_counter() - positioning_t0
+                ) * 1000
+
+                coordinate_t0 = time.perf_counter()
                 m60_prepare, e4o4_prepare = self._sample_coordinate_pair()
+                detail_ct["coordinate_ms"] = (
+                    time.perf_counter() - coordinate_t0
+                ) * 1000
             except Exception:
                 self._safe_servo_off()
                 self._operation = "idle"
@@ -654,6 +714,7 @@ class LctMotionBackend(MotionBackend):
             )
             move_started = False
             try:
+                compare_config_t0 = time.perf_counter()
                 pre_config = self._e4o4.configure_pre_compare(
                     slave_no=self._config.e4o4_slave_no,
                     encoder_no=self._config.encoder_no,
@@ -663,10 +724,20 @@ class LctMotionBackend(MotionBackend):
                     direction=0,
                     polarity=self._config.trigger_polarity,
                 )
+                detail_ct["compare_config_ms"] = (
+                    time.perf_counter() - compare_config_t0
+                ) * 1000
+
+                compare_arm_t0 = time.perf_counter()
                 self._e4o4.arm_pre_compare(
                     self._config.e4o4_slave_no,
                     self._config.precompare_no,
                 )
+                detail_ct["compare_arm_ms"] = (
+                    time.perf_counter() - compare_arm_t0
+                ) * 1000
+
+                capture_motion_t0 = time.perf_counter()
                 self._m60.absolute_move(
                     self._config.axis_no,
                     finish_counts,
@@ -681,11 +752,19 @@ class LctMotionBackend(MotionBackend):
                     cancel_event=cancel_event,
                 )
                 move_started = False
+                detail_ct["capture_motion_ms"] = (
+                    time.perf_counter() - capture_motion_t0
+                ) * 1000
+
+                trigger_verify_t0 = time.perf_counter()
                 time.sleep(0.05)
                 actual_count = self._e4o4.get_trigger_count(
                     self._config.e4o4_slave_no,
                     self._config.trigger_out_no,
                 )
+                detail_ct["trigger_verify_ms"] = (
+                    time.perf_counter() - trigger_verify_t0
+                ) * 1000
                 if actual_count != pre_config.expected_trigger_count:
                     raise LctStateError(
                         "E4O4单点飞拍触发数不符: "
@@ -704,10 +783,28 @@ class LctMotionBackend(MotionBackend):
                 self._safe_servo_off()
                 raise
             finally:
+                cleanup_t0 = time.perf_counter()
                 self._safe_disarm_pre()
+                detail_ct["cleanup_ms"] = (
+                    time.perf_counter() - cleanup_t0
+                ) * 1000
                 if move_started:
                     self._safe_stop_axis()
                 self._operation = "idle"
+                logger.info(
+                    "LCT CT[single] | 准备定位 %.1fms | 坐标采样 %.1fms | "
+                    "比较器配置 %.1fms | 比较器使能 %.1fms | "
+                    "触发运动 %.1fms | 触发校验 %.1fms | "
+                    "比较器清理 %.1fms | 总计 %.1fms",
+                    detail_ct.get("positioning_ms", 0.0),
+                    detail_ct.get("coordinate_ms", 0.0),
+                    detail_ct.get("compare_config_ms", 0.0),
+                    detail_ct.get("compare_arm_ms", 0.0),
+                    detail_ct.get("capture_motion_ms", 0.0),
+                    detail_ct.get("trigger_verify_ms", 0.0),
+                    detail_ct.get("cleanup_ms", 0.0),
+                    (time.perf_counter() - detail_t0) * 1000,
+                )
 
     def _require_autofocus_ready(self) -> None:
         if not self._homed:

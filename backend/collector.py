@@ -84,6 +84,11 @@ class PhaseCollector:
         # 0.0 表示尚未发送过，因此第一帧可以立即发送。
         self._last_preview_ts = 0.0
 
+        # 当前飞拍阶段的耗时明细，由 pipeline.run_phase() 在阶段
+        # 成功完成后写入。Collector 只负责保存快照，不参与计时，
+        # 因而不会给相机 SDK 回调增加额外负担。
+        self._timings_ms: Dict[str, float] = {}
+
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
 
@@ -147,6 +152,21 @@ class PhaseCollector:
                 "dropped": self._dropped,
                 "processed": self._processed,
             }
+
+    def set_timings(self, timings_ms: Dict[str, float]) -> None:
+        """保存当前阶段的耗时明细。"""
+
+        with self._lock:
+            self._timings_ms = {
+                str(name): float(value)
+                for name, value in timings_ms.items()
+            }
+
+    def timings(self) -> Dict[str, float]:
+        """返回当前阶段耗时明细的只读副本。"""
+
+        with self._lock:
+            return dict(self._timings_ms)
 
     def wait(self, count: int, timeout: float) -> bool:
         """等待指定数量的帧完成评价。

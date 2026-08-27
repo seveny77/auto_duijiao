@@ -6,6 +6,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import time
 from typing import Dict, Optional, Type
 
 
@@ -30,6 +31,7 @@ class SearchContext:
         self._eval = evaluator
         self.cfg = cfg
         self.template = template
+        self.last_coarse_ct_ms: dict[str, float] = {}
 
     def coarse_scan(self, start_um, end_um, step_um):
         """均匀粗扫飞拍，返回 (positions, scores, best_frame)。NCC 用。"""
@@ -73,7 +75,13 @@ class SearchContext:
 
         # 粗扫结束后立即停止取流。
         # 后面的 ROI 检测/YOLO 不应与相机回调并发运行。
+        phase_ct = col.timings()
+        stop_t0 = time.perf_counter()
         col.stop()
+        phase_ct["collector_stop_ms"] = (
+            time.perf_counter() - stop_t0
+        ) * 1000
+        self.last_coarse_ct_ms = phase_ct
 
         # PhaseCollector.scores() 返回：
         # {帧序号: 清晰度得分}
@@ -157,23 +165,70 @@ class NCCStrategy(FocusStrategy):
     def predict_peak(self, ctx: SearchContext) -> PeakPrediction:
         from backend.ncc import ncc_predict_peak
 
+        coarse_t0 = time.perf_counter()
         positions, scores, best_frame = ctx.coarse_scan(
             ctx.cfg.search_start_um,
             ctx.cfg.search_start_um + ctx.cfg.search_span_um,
             ctx.cfg.coarse_step_um,
         )
+        coarse_total_ms = (
+            time.perf_counter() - coarse_t0
+        ) * 1000
+
+        ncc_t0 = time.perf_counter()
         peak_um, ncc_max, quality = ncc_predict_peak(
             positions, scores, ctx.template,
             ctx.cfg.search_start_um,
             ctx.cfg.search_start_um + ctx.cfg.search_span_um,
             min_score=ctx.cfg.ncc_min_score,
         )
+        ncc_ms = (
+            time.perf_counter() - ncc_t0
+        ) * 1000
+
+        coarse_phase_ct = ctx.last_coarse_ct_ms
         return PeakPrediction(
             peak_um=peak_um,
             quality=quality,
             ncc_max=ncc_max,
             roi_frame=best_frame,
             coarse_points=list(zip(positions, scores)),
+            extra={
+                "ct_ms": {
+                    "coarse_total_ms": coarse_total_ms,
+                    "coarse_collector_start_ms": (
+                        coarse_phase_ct.get(
+                            "collector_start_ms",
+                            0.0,
+                        )
+                    ),
+                    "coarse_motion_ms": (
+                        coarse_phase_ct.get(
+                            "motion_ms",
+                            0.0,
+                        )
+                    ),
+                    "coarse_frame_wait_ms": (
+                        coarse_phase_ct.get(
+                            "frame_wait_ms",
+                            0.0,
+                        )
+                    ),
+                    "coarse_stabilize_ms": (
+                        coarse_phase_ct.get(
+                            "stabilize_ms",
+                            0.0,
+                        )
+                    ),
+                    "coarse_stop_ms": (
+                        coarse_phase_ct.get(
+                            "collector_stop_ms",
+                            0.0,
+                        )
+                    ),
+                    "ncc_ms": ncc_ms,
+                },
+            },
         )
 
 

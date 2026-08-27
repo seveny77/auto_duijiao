@@ -91,6 +91,7 @@ def run_phase(
     phase_name: str = "",
 ) -> Tuple[PhaseCollector, int, float]:
     """执行一次飞拍并校验张数；返回(collector, 触发数, 耗时)。"""
+    phase_t0 = time.perf_counter()
     collector = PhaseCollector(
         cam,
         evaluator,
@@ -105,7 +106,11 @@ def run_phase(
     )
     try:
         # 启动相机硬件触发、注册回调，并启动图像评价线程。
+        collector_start_t0 = time.perf_counter()
         collector.start()
+        collector_start_ms = (
+            time.perf_counter() - collector_start_t0
+        ) * 1000
 
         # M60负责运动，E4O4线性比较器按位置触发相机。
         t0 = time.perf_counter()
@@ -118,13 +123,20 @@ def run_phase(
             phase_name=phase_name,
         )
         dur = time.perf_counter() - t0
+        motion_ms = dur * 1000
 
         # 运动后端返回以后，立即检查用户是否已请求取消。
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("用户取消")
 
         # 等待 Collector 完成指定数量图像的清晰度评价。
-        if not collector.wait(count, wait_timeout):
+        frame_wait_t0 = time.perf_counter()
+        wait_ok = collector.wait(count, wait_timeout)
+        frame_wait_ms = (
+            time.perf_counter() - frame_wait_t0
+        ) * 1000
+
+        if not wait_ok:
             # 获取一次统计快照，保证下面日志中的各项数字
             # 来自同一个时间点。
             stats = collector.stats()
@@ -158,6 +170,7 @@ def run_phase(
         #
         # 如果processed一直等于E4O4返回的触发数，并且队列为空，
         # 说明所有帧已经完成评价，不必进入后面的完整稳定期。
+        stabilize_t0 = time.perf_counter()
         fast_ok = True
         for _ in range(3):
             if cancel_event is not None and cancel_event.is_set():
@@ -193,6 +206,10 @@ def run_phase(
 
                 time.sleep(0.02)
 
+        stabilize_ms = (
+            time.perf_counter() - stabilize_t0
+        ) * 1000
+
         # 稳定期结束以后必须执行严格张数检查。
         #
         # 如果处理数量比E4O4触发数少，说明发生了丢帧；
@@ -217,6 +234,16 @@ def run_phase(
                 count,
                 expected_n,
             )
+
+        collector.set_timings({
+            "collector_start_ms": collector_start_ms,
+            "motion_ms": motion_ms,
+            "frame_wait_ms": frame_wait_ms,
+            "stabilize_ms": stabilize_ms,
+            "phase_total_ms": (
+                time.perf_counter() - phase_t0
+            ) * 1000,
+        })
 
         # 只有完整成功时，才把仍然可供读取分数和图像的
         # Collector 交给调用方。
@@ -351,6 +378,12 @@ def run_search(cfg) -> int:
         t0 = time.perf_counter()
         pred = strategy.predict_peak(ctx)
         ct["predict_ms"] = (time.perf_counter() - t0) * 1000
+        strategy_ct = pred.extra.get("ct_ms", {})
+        if isinstance(strategy_ct, dict):
+            ct.update({
+                str(name): float(value)
+                for name, value in strategy_ct.items()
+            })
         predicted_peak_um = pred.peak_um
         ncc_max = pred.ncc_max
         quality = pred.quality
@@ -485,6 +518,19 @@ def run_search(cfg) -> int:
                 phase_name="fine",
             )
             ct["fine_ms"] = (time.perf_counter() - t0) * 1000
+            fine_phase_ct = col_f.timings()
+            ct["fine_collector_start_ms"] = (
+                fine_phase_ct.get("collector_start_ms", 0.0)
+            )
+            ct["fine_motion_ms"] = (
+                fine_phase_ct.get("motion_ms", 0.0)
+            )
+            ct["fine_frame_wait_ms"] = (
+                fine_phase_ct.get("frame_wait_ms", 0.0)
+            )
+            ct["fine_stabilize_ms"] = (
+                fine_phase_ct.get("stabilize_ms", 0.0)
+            )
             fine_map = col_f.scores()
             fine_scores = [fine_map.get(i) for i in range(count_f)]
             if any(s is None for s in fine_scores):
@@ -511,27 +557,52 @@ def run_search(cfg) -> int:
         final_img = None
         t0 = time.perf_counter()
         if col_f is not None:
+            fine_stop_t0 = time.perf_counter()
             col_f.stop()
+            ct["fine_stop_ms"] = (
+                time.perf_counter() - fine_stop_t0
+            ) * 1000
         if not sim:
+            final_switch_t0 = time.perf_counter()
             set_full_frame(cam, 1)
+            ct["final_switch_ms"] = (
+                time.perf_counter() - final_switch_t0
+            ) * 1000
+
+            final_collector_start_t0 = time.perf_counter()
             final_col = PhaseCollector(cam, evaluator, save_dir=cfg.save_dir, start_index=200)
             final_col.start()
+            ct["final_collector_start_ms"] = (
+                time.perf_counter()
+                - final_collector_start_t0
+            ) * 1000
+
+        single_capture_t0 = time.perf_counter()
         final_trigger_count = motion.capture_at_position(
             final_position_um,
             timeout_s=cfg.flyscan_timeout,
             cancel_event=cancel,
         )
+        ct["single_capture_ms"] = (
+            time.perf_counter() - single_capture_t0
+        ) * 1000
         if final_trigger_count != 1:
             raise RuntimeError(
                 "最佳位置单点飞拍触发数异常: "
                 f"{final_trigger_count}"
             )
         if not sim:
+            final_frame_wait_t0 = time.perf_counter()
             deadline = time.monotonic() + cfg.final_frame_timeout
             while time.monotonic() < deadline:
                 if final_col.processed >= 1:
                     break
                 time.sleep(0.02)
+            ct["final_frame_wait_ms"] = (
+                time.perf_counter()
+                - final_frame_wait_t0
+            ) * 1000
+
             if final_col.processed >= 1:
                 final_img = final_col.image(0)
                 if cfg.save_dir and final_img is not None:
@@ -539,7 +610,12 @@ def run_search(cfg) -> int:
                 if cfg.save_images and final_img is not None:
                     save_jpg(final_img,
                              os.path.join(cfg.save_images, f"final_{final_position_um:.0f}um.jpg"))
+
+            final_stop_t0 = time.perf_counter()
             final_col.stop()
+            ct["final_stop_ms"] = (
+                time.perf_counter() - final_stop_t0
+            ) * 1000
             final_col = None
         else:
             logger.info(
@@ -847,7 +923,25 @@ def run_calibrate(cfg) -> int:
                 phase_name="calibrate",
             )
             ct["cal_flyscan_ms"] = (time.perf_counter() - t0) * 1000
+            cal_phase_ct = col.timings()
+            ct["cal_collector_start_ms"] = (
+                cal_phase_ct.get("collector_start_ms", 0.0)
+            )
+            ct["cal_motion_ms"] = (
+                cal_phase_ct.get("motion_ms", 0.0)
+            )
+            ct["cal_frame_wait_ms"] = (
+                cal_phase_ct.get("frame_wait_ms", 0.0)
+            )
+            ct["cal_stabilize_ms"] = (
+                cal_phase_ct.get("stabilize_ms", 0.0)
+            )
+
+            cal_stop_t0 = time.perf_counter()
             col.stop()
+            ct["cal_stop_ms"] = (
+                time.perf_counter() - cal_stop_t0
+            ) * 1000
             if cancel is not None and cancel.is_set():
                 raise RuntimeError("用户取消")
             # 按序取分数（scores 是 dict，缺帧会 KeyError，用 .get）
