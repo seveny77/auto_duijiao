@@ -54,6 +54,7 @@ class MotionBackend(ABC):
         timeout_s: float,
         cancel_event=None,
         phase_name: str = "",
+        velocity_um_s: float = None,
     ) -> int:
         """执行等间距飞拍。
 
@@ -71,6 +72,11 @@ class MotionBackend(ABC):
 
             timeout_s:
                 本次飞拍允许的最大执行时间。
+
+            velocity_um_s:
+                可选的本次飞拍速度覆盖值。None表示继续按照phase_name
+                从运动配置中选择速度。该参数主要用于速度验证，不改变
+                标定、粗扫和精扫的现有调用行为。
 
         Returns:
             E4O4实际输出的相机触发次数。

@@ -434,6 +434,7 @@ class LctMotionBackend(MotionBackend):
         timeout_s: float,
         cancel_event=None,
         phase_name="",
+        velocity_um_s: float | None = None,
     ) -> int:
         """从start正向飞拍，越过end后再运动配置的末端余量。"""
 
@@ -470,12 +471,20 @@ class LctMotionBackend(MotionBackend):
                 ),
             }
 
-            velocity_um_s = (
-                velocity_um_s_by_phase.get(
-                    phase_name,
-                    self._config.scan_velocity_um_s,
+            if velocity_um_s is None:
+                velocity_um_s = (
+                    velocity_um_s_by_phase.get(
+                        phase_name,
+                        self._config.scan_velocity_um_s,
+                    )
                 )
-            )
+            else:
+                velocity_um_s = float(velocity_um_s)
+                if velocity_um_s <= 0:
+                    raise ValueError(
+                        "飞拍速度覆盖值必须大于0: "
+                        f"{velocity_um_s}"
+                    )
 
             velocity_counts_s = (
                     velocity_um_s
