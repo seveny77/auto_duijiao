@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """主窗口模块（课程 A：代码修缮）"""
+import copy
 import logging
+import time
 from gui.app.services.qt_log_handler import (
     install_qt_log_handler,
     remove_qt_log_handler,
@@ -9,11 +11,15 @@ import os
 from gui.app.widgets.image_view import ImageWidget
 from gui.app.widgets.curve_panel import CurvePanel
 from gui.app.widgets.log_panel import LogPanel
+from gui.app.widgets.inspection_panel import InspectionPanel
 from gui.app.services.config_service import ConfigService
+from backend.inspection_config import InspectionConfig, InspectionConfigStore
+from backend.inspection_engine import InspectionRuleEngine
 from gui.app.services.controller import AppController
 from gui.app.services.ct_logger import CtLogger
 from gui.app.services.result_presenter import ResultPresenter
 from gui.app.services.motion_service import MotionService
+from gui.app.services.inspection_service import InspectionService
 from gui.app.services.camera_service import CameraService
 from gui.app.services.live_view_service import LiveViewService
 from gui.app.services.focus_task_service import FocusTaskService
@@ -32,6 +38,7 @@ from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QTabWidget,
     QMessageBox,
 
 )
@@ -52,7 +59,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("自动对焦系统")
+        self.setWindowTitle("端面检测系统")
         self.resize(1280, 800)
         self.statusBar().showMessage("就绪")
         self._build_ui()          # 把界面搭建交给单独的方法
@@ -108,6 +115,26 @@ class MainWindow(QMainWindow):
             project_root=PROJECT_ROOT,
         )
         self.config_service.load()
+
+        # 检测配置独立保存，不混入现有对焦 config.json。
+        self.inspection_config_store = InspectionConfigStore(
+            os.path.join(PROJECT_ROOT, "gui", "inspection_config.json")
+        )
+        try:
+            self.inspection_config = self.inspection_config_store.load()
+        except (OSError, ValueError) as error:
+            logger.warning("检测配置读取失败，将使用默认配置: %s", error)
+            self.inspection_config = InspectionConfig()
+
+        self.inspection_service = InspectionService(parent=self)
+        self.inspection_recheck_engine = InspectionRuleEngine()
+        self.inspection_panel.set_inspection_config(self.inspection_config)
+        self._inspection_current_task_id = ""
+        self._inspection_current_image = None
+        self._inspection_source_result = None
+        self._inspection_circle_request_config = None
+        self._inspection_close_requested = False
+        self._inspection_shutdown_connected = False
         self.motion_service = MotionService(
             connect_btn=self.param_panel.motion_connect_btn,
             stroke_label=self.param_panel.motion_stroke_label,
@@ -162,6 +189,50 @@ class MainWindow(QMainWindow):
     # ===================================================
     def _connect_signals(self):
         self.status_message.connect(self._show_status) #更新状态栏
+        self.inspection_panel.model_load_requested.connect(
+            self._on_inspection_model_load
+        )
+        self.inspection_panel.inspection_config_save_requested.connect(
+            self._on_inspection_config_save
+        )
+        self.inspection_panel.inspection_config_invalid.connect(
+            lambda message: self._log(f"[检测] 配置输入错误: {message}")
+        )
+        self.inspection_panel.inspection_recalculate_requested.connect(
+            self._on_inspection_recalculate
+        )
+        self.inspection_panel.circle_redetection_requested.connect(
+            self._on_circle_redetection_request
+        )
+        self.inspection_panel.circle_confirmation_requested.connect(
+            self._on_circle_confirmation_request
+        )
+        self.inspection_service.model_loading.connect(
+            self.inspection_panel.set_model_loading
+        )
+        self.inspection_service.model_loaded.connect(
+            self._on_inspection_model_loaded
+        )
+        self.inspection_service.model_load_failed.connect(
+            self._on_inspection_model_load_failed
+        )
+        self.inspection_service.image_pending.connect(
+            lambda task_id: self._log(f"[检测] 最终图已排队，等待模型: {task_id}")
+        )
+        self.inspection_service.inspection_started.connect(
+            lambda task_id: self.status_message.emit(
+                f"正在后台检测最终图像 ({task_id})"
+            )
+        )
+        self.inspection_service.inspection_finished.connect(
+            self._on_inspection_finished
+        )
+        self.inspection_service.inspection_visual_ready.connect(
+            self._on_inspection_visual_ready
+        )
+        self.inspection_service.circle_redetection_finished.connect(
+            self._on_circle_redetection_finished
+        )
         self.param_panel.motion_connect_btn.clicked.connect(
             self._on_motion_connect
         )
@@ -208,12 +279,275 @@ class MainWindow(QMainWindow):
     def _show_status(self, text: str):
         self.statusBar().showMessage(text)
 
+    def _on_inspection_model_load(self, model_path: str):
+        """响应检测页的手动加载请求，实际加载交给后台服务。"""
+
+        self.inspection_config.model_path = model_path
+
+        try:
+            accepted = self.inspection_service.load_model(
+                model_path,
+                self.inspection_config,
+            )
+        except RuntimeError as error:
+            QMessageBox.warning(self, "检测模型", str(error))
+            self._log(f"[检测] {error}")
+            return
+
+        if not accepted:
+            self._log("[检测] 当前无法提交模型加载请求")
+
+    def _on_inspection_config_save(self, config: InspectionConfig):
+        """校验并原子保存检测配置；失败时保留上一份有效配置。"""
+
+        errors = config.validate()
+        if errors:
+            self.status_message.emit("检测配置有误，未保存")
+            self._log("[检测] 配置校验未通过，未覆盖原配置:")
+            for message in errors:
+                self._log(f"[检测] - {message}")
+            return
+
+        try:
+            self.inspection_config_store.save(config)
+        except (OSError, TypeError, ValueError) as error:
+            self.status_message.emit("检测配置保存失败")
+            self._log(f"[检测] 配置保存失败: {error}")
+            return
+
+        self.inspection_config = config
+        self.inspection_panel.accept_inspection_config(config)
+        self.status_message.emit("检测配置已保存")
+        self._log(
+            f"[检测] 检测配置已保存: {self.inspection_config_store.path}"
+        )
+
+    def _on_inspection_model_loaded(self, model_path: str, metadata):
+        """把后台加载成功信息显示到检测页并写入日志。"""
+
+        self.inspection_panel.set_model_loaded(model_path, metadata)
+        self._log(f"[检测] 语义分割模型已加载: {model_path}")
+
+    def _on_inspection_model_load_failed(self, message: str):
+        """把后台加载失败信息显示到检测页和底部日志。"""
+
+        self.inspection_panel.set_model_load_failed(message)
+        self._log(f"[检测] 模型加载失败: {message}")
+
     def _on_focus_finished(self, result):
         """展示结果，并刷新任务结束后的轴位置和伺服状态。"""
 
         self.result_presenter.handle_finished(result)
+        self._submit_final_image_for_inspection(result)
         if self.motion_service.backend is not None:
             self.motion_service.refresh_state()
+
+    def _submit_final_image_for_inspection(self, result):
+        """将成功搜索得到的最终图旁路提交给独立检测服务。"""
+
+        if getattr(result, "action", "") != "search":
+            return
+        if getattr(result, "rc", 1) != 0:
+            return
+
+        final_image = getattr(result, "final_image", None)
+        if final_image is None:
+            return
+
+        try:
+            task_id = self.inspection_service.submit_image(
+                final_image,
+                self.inspection_config,
+            )
+        except (TypeError, ValueError) as error:
+            self._log(f"[检测] 最终图提交失败: {error}")
+            return
+
+        if task_id:
+            self._log(f"[检测] 已提交最终图，任务号: {task_id}")
+
+    def _on_inspection_finished(self, task_id: str, result):
+        """接收后台检测结果，先更新判定摘要并写入日志。"""
+
+        status = getattr(getattr(result, "status", None), "value", "PENDING")
+        verdict = {"PASS": "合格", "FAIL": "不合格", "ERROR": "检测错误"}.get(status, "待确认")
+        self.inspection_panel.verdict_label.setText(verdict)
+        self.inspection_panel.verdict_detail_label.setText(f"任务：{task_id}")
+        self._log(f"[检测] 任务 {task_id} 完成，结果: {verdict}")
+
+        error = str(getattr(result, "error", "") or "").strip()
+        if error:
+            self._log(f"[检测] 错误: {error}")
+        for message in list(getattr(result, "warnings", []) or []):
+            self._log(f"[检测] 警告: {message}")
+        for message in list(getattr(result, "failure_reasons", []) or []):
+            self._log(f"[检测] 失败原因: {message}")
+
+    def _on_inspection_visual_ready(
+        self,
+        task_id: str,
+        original_image,
+        result,
+        config,
+    ):
+        """按任务号对应的原图绘制检测轮廓并刷新结果页。"""
+
+        try:
+            self._inspection_current_task_id = task_id
+            self._inspection_current_image = original_image
+            # 保留首次推理和找圆的原始输出。后续参数复判始终复用它，
+            # 不把某次复判结果当作下一次的模型输入。
+            self._inspection_source_result = result
+            self.inspection_panel.present_inspection_result(
+                task_id,
+                original_image,
+                result,
+                config,
+            )
+        except (TypeError, ValueError) as error:
+            self._log(f"[检测] 结果绘制失败: {error}")
+
+    def _on_circle_redetection_request(self, config: InspectionConfig):
+        """将当前图提交给检测线程，只重新执行 Hough 和规则统计。"""
+
+        if (
+            self._inspection_current_image is None
+            or self._inspection_source_result is None
+            or not self._inspection_current_task_id
+        ):
+            self._log("[检测] 当前没有可重新找圆的检测图")
+            return
+        try:
+            accepted = self.inspection_service.redetect_circle(
+                self._inspection_current_task_id,
+                self._inspection_current_image,
+                self._inspection_source_result,
+                config,
+            )
+        except (TypeError, ValueError) as error:
+            self._log(f"[检测] 重新找圆提交失败: {error}")
+            return
+        if not accepted:
+            self._log("[检测] 检测服务正忙，无法重复提交重新找圆")
+            return
+
+        self._inspection_circle_request_config = config
+        self.inspection_panel.set_circle_redetecting()
+        self.status_message.emit("正在后台重新查找当前图圆心")
+
+    def _on_circle_redetection_finished(self, task_id: str, result):
+        """接收仅 Hough 任务结果，并复用原分割实例刷新当前图。"""
+
+        if task_id != self._inspection_current_task_id:
+            return
+        config = self._inspection_circle_request_config
+        self._inspection_circle_request_config = None
+        if config is None:
+            return
+
+        if getattr(getattr(result, "status", None), "value", "") == "ERROR":
+            message = str(getattr(result, "error", "") or "重新找圆失败")
+            self.inspection_panel.set_circle_redetection_failed(message)
+            self._log(f"[检测] 重新找圆失败: {message}")
+            self.status_message.emit("重新找圆失败")
+            return
+
+        self._inspection_source_result = result
+        try:
+            self.inspection_panel.present_recalculated_result(
+                task_id,
+                result,
+                config,
+            )
+        except (TypeError, ValueError) as error:
+            self.inspection_panel.set_circle_redetection_failed(str(error))
+            self._log(f"[检测] 重新找圆结果绘制失败: {error}")
+            return
+        for message in list(getattr(result, "warnings", []) or []):
+            self._log(f"[检测] 找圆警告: {message}")
+        for message in list(getattr(result, "failure_reasons", []) or []):
+            self._log(f"[检测] 重新找圆判定原因: {message}")
+        circle_count = len(getattr(result, "circle_candidates", []) or [])
+        self._log(f"[检测] 当前图重新找圆完成，候选数: {circle_count}")
+        self.status_message.emit("当前图重新找圆完成")
+
+    def _on_circle_confirmation_request(self, config: InspectionConfig):
+        """确认最高评分候选圆并轻量复判，不重新运行 Hough。"""
+
+        source = self._inspection_source_result
+        if source is None or not source.circle_candidates:
+            self._log("[检测] 当前没有可确认的候选圆")
+            return
+        selected_index = source.selected_circle_index
+        if not isinstance(selected_index, int) or not (
+            0 <= selected_index < len(source.circle_candidates)
+        ):
+            self._log("[检测] 当前候选圆序号无效")
+            return
+
+        started = time.perf_counter()
+        confirmed_source = copy.copy(source)
+        confirmed_source.circle_confirmed = True
+        try:
+            result = self.inspection_recheck_engine.reevaluate(
+                confirmed_source,
+                mm_per_pixel=config.mm_per_pixel,
+                region_rules=config.region_rules,
+            )
+        except (TypeError, ValueError) as error:
+            self._log(f"[检测] 圆心确认复判失败: {error}")
+            return
+        result.timings_ms = copy.deepcopy(source.timings_ms)
+        result.timings_ms["circle_confirmation_reevaluation"] = (
+            time.perf_counter() - started
+        ) * 1000.0
+        self._inspection_source_result = result
+        try:
+            self.inspection_panel.present_recalculated_result(
+                self._inspection_current_task_id,
+                result,
+                config,
+            )
+        except (TypeError, ValueError) as error:
+            self._log(f"[检测] 圆心确认结果绘制失败: {error}")
+            return
+        for message in list(getattr(result, "failure_reasons", []) or []):
+            self._log(f"[检测] 圆心确认判定原因: {message}")
+        self._log("[检测] 已人工确认当前最高评分候选圆")
+        self.status_message.emit("当前圆心已确认并完成复判")
+
+    def _on_inspection_recalculate(self, config: InspectionConfig):
+        """复用已有实例和圆候选，只重新执行规则统计与叠加绘制。"""
+
+        source = self._inspection_source_result
+        if source is None or not self._inspection_current_task_id:
+            return
+
+        started = time.perf_counter()
+        try:
+            result = self.inspection_recheck_engine.reevaluate(
+                source,
+                mm_per_pixel=config.mm_per_pixel,
+                region_rules=config.region_rules,
+            )
+            result.timings_ms = copy.deepcopy(source.timings_ms)
+            result.timings_ms["reevaluation"] = (
+                time.perf_counter() - started
+            ) * 1000.0
+            self.inspection_panel.present_recalculated_result(
+                self._inspection_current_task_id,
+                result,
+                config,
+            )
+            verdict = {
+                "PASS": "合格",
+                "FAIL": "不合格",
+                "PENDING": "待确认",
+                "ERROR": "检测错误",
+            }.get(result.status.value, "待确认")
+            self.status_message.emit(f"当前图参数复判完成：{verdict}")
+        except (TypeError, ValueError) as error:
+            self._log(f"[检测] 当前图参数复判失败: {error}")
 
     def _on_focus_error(self, error_text: str):
         """展示后台异常，并刷新运动控制器安全状态。"""
@@ -321,7 +655,11 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget()                       # 中央容器（一个普通控件）
         root = QVBoxLayout(central)               # 整体垂直排：上面主体 + 下面日志
-        top = QHBoxLayout()                       # 主体水平排：左面板 + 图像区
+
+        self.main_tabs = QTabWidget()
+
+        focus_page = QWidget()
+        top = QHBoxLayout(focus_page)             # 对焦页：左面板 + 图像区
 
         self.param_panel = ParamPanel()
         top.addWidget(self.param_panel)   # 左面板（自身固定宽度）
@@ -332,7 +670,12 @@ class MainWindow(QMainWindow):
         self.curve_panel = CurvePanel()
         top.addWidget(self.curve_panel)
 
-        root.addLayout(top, 1)                    # 主体占垂直方向剩余空间
+        self.main_tabs.addTab(focus_page, "对焦过程")
+
+        self.inspection_panel = InspectionPanel()
+        self.main_tabs.addTab(self.inspection_panel, "检测结果")
+
+        root.addWidget(self.main_tabs, 1)         # 主体占垂直方向剩余空间
 
         self.log_panel = LogPanel()   # 底部日志
         root.addWidget(self.log_panel)
@@ -360,6 +703,20 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """安全关闭主窗口。"""
+
+        # 检测模型可能正在独立线程中加载或推理，先等待其自然退出。
+        if not self.inspection_service.is_shutdown_complete:
+            self._inspection_close_requested = True
+            self.inspection_service.begin_shutdown()
+            self.status_message.emit("正在停止检测后台线程，完成后将自动关闭")
+            if not self._inspection_shutdown_connected:
+                self.inspection_service.shutdown_ready.connect(
+                    self.close,
+                    Qt.QueuedConnection,
+                )
+                self._inspection_shutdown_connected = True
+            event.ignore()
+            return
 
         if not self.shutdown_service.try_shutdown():
             event.ignore()
