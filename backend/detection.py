@@ -94,3 +94,76 @@ def detect_roi(
         "fallback",
         None,
     )
+
+
+def detect_local_roi(
+    image,
+    conf: float,
+    model,
+) -> Tuple[
+    Tuple[int, int, int, int],
+    str,
+    Optional[Tuple[float, float, float, float]],
+]:
+    """在当前相机硬件ROI图像内检测清晰度评价框。
+
+    与 :func:`detect_roi` 的区别是，本函数返回的坐标始终属于输入
+    ``image``，不会乘binning，也不会转换成传感器全幅坐标。检测失败
+    时使用整张输入图像，并明确返回 ``fallback_preset``。
+    """
+
+    if image is None or getattr(image, "ndim", 0) < 2:
+        raise ValueError("YOLO局部ROI检测收到无效图像")
+
+    height, width = image.shape[:2]
+    fallback = (0, 0, int(width), int(height))
+
+    if model is None:
+        logger.warning("YOLO模型不可用，使用整个预设硬件ROI评价")
+        return fallback, "fallback_preset", None
+
+    try:
+        results = model.predict(
+            source=image,
+            conf=float(conf),
+            verbose=False,
+        )
+        boxes = results[0].boxes
+        if boxes is None or len(boxes) == 0:
+            logger.warning("第一帧YOLO未检测到目标，使用预设ROI兜底")
+            return fallback, "fallback_preset", None
+
+        box_index = 0
+        confidences = getattr(boxes, "conf", None)
+        if confidences is not None and len(confidences) > 0:
+            try:
+                box_index = int(confidences.argmax().item())
+            except Exception:
+                box_index = 0
+
+        x1, y1, x2, y2 = boxes.xyxy[box_index].tolist()
+        raw_box = (
+            float(x1),
+            float(y1),
+            float(x2),
+            float(y2),
+        )
+
+        left = max(0, min(width - 1, int(round(x1))))
+        top = max(0, min(height - 1, int(round(y1))))
+        right = max(left + 1, min(width, int(round(x2))))
+        bottom = max(top + 1, min(height, int(round(y2))))
+        local_roi = (
+            left,
+            top,
+            right - left,
+            bottom - top,
+        )
+        return local_roi, "detect", raw_box
+
+    except Exception as error:
+        logger.warning(
+            "第一帧YOLO检测异常，使用预设ROI兜底: %s",
+            error,
+        )
+        return fallback, "fallback_preset", None

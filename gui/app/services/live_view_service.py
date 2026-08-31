@@ -25,6 +25,7 @@ class LiveViewService(QObject):
         image_widget,
         live_btn,
         status_fn,
+        camera_fn=None,
     ):
         super().__init__()
 
@@ -32,6 +33,9 @@ class LiveViewService(QObject):
         self._image_widget = image_widget
         self._live_btn = live_btn
         self._status_fn = status_fn
+        # 返回CameraService的常驻相机句柄；未连接时为None，
+        # 预览走自开自关的旧路径。
+        self._camera_fn = camera_fn
 
         self._worker = None
         self._thread = None
@@ -72,11 +76,15 @@ class LiveViewService(QObject):
             return False
 
         stop_event = threading.Event()
+        resident_camera = (
+            self._camera_fn() if self._camera_fn is not None else None
+        )
         worker = LiveViewWorker(
             source=source,
             project_root=self._project_root,
             stop_event=stop_event,
             camera_params=dict(camera_params or {}),
+            camera=resident_camera,
         )
 
         worker.frame.connect(

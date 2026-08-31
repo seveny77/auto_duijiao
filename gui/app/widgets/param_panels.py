@@ -138,6 +138,12 @@ class ParamPanel(QWidget):
         )
         self.decimation_combo = QComboBox()
         self.decimation_combo.addItems(["1x1", "2x2", "4x4"])
+        self.camera_connect_btn = QPushButton("连接相机")
+        self.camera_connect_btn.setToolTip(
+            "手动连接/断开相机；连接后句柄常驻，"
+            "搜索、标定和实时预览共用，省去每次重开"
+        )
+        self.camera_connection_label = QLabel("未连接")
         form.addRow(
             "触发模式:",
             self.trigger_mode_label,
@@ -145,6 +151,8 @@ class ParamPanel(QWidget):
         form.addRow("曝光时间:", self.exposure_spin)
         form.addRow("增益:", self.gain_spin)
         form.addRow("下采样(dec):", self.decimation_combo)
+        form.addRow("连接状态:", self.camera_connection_label)
+        form.addRow(self.camera_connect_btn)
         return group
 
     # ---------- 流程控制 ----------
@@ -449,6 +457,7 @@ class ParamPanel(QWidget):
             self.gain_spin,
             self.decimation_combo,
             self.motion_connect_btn,
+            self.camera_connect_btn,
             self.motion_reset_btn,
             self.motion_servo_btn,
             self.motion_home_btn,

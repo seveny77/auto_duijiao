@@ -6,6 +6,8 @@ import math
 import threading
 import time
 
+import perf
+
 from motion.base import MotionBackend
 from motion.state import MotionState
 from motion.lct.config import LctMotionConfig
@@ -60,6 +62,7 @@ class LctMotionBackend(MotionBackend):
             self._config.validate_files()
 
             try:
+                m60_init_t0 = time.perf_counter()
                 self._m60.load()
                 self._m60.open(self._config.card_no)
                 self._m60.load_eni(self._config.eni_path)
@@ -71,7 +74,12 @@ class LctMotionBackend(MotionBackend):
                     self._config.axis_param_path
                 )
                 time.sleep(1.0)
+                perf.record(
+                    "lct.connect.m60_init_ms",
+                    (time.perf_counter() - m60_init_t0) * 1000,
+                )
 
+                e4o4_init_t0 = time.perf_counter()
                 self._e4o4.load()
                 self._e4o4.connect(
                     option=0,
@@ -93,7 +101,12 @@ class LctMotionBackend(MotionBackend):
                     ),
                     polarity=self._config.trigger_polarity,
                 )
+                perf.record(
+                    "lct.connect.e4o4_init_ms",
+                    (time.perf_counter() - e4o4_init_t0) * 1000,
+                )
 
+                status_check_t0 = time.perf_counter()
                 status = self._m60.get_axis_status(
                     self._config.axis_no
                 )
@@ -101,6 +114,10 @@ class LctMotionBackend(MotionBackend):
                     raise LctStateError("M60轴掉线，无法建立有效连接")
                 self._stroke_counts = self._m60.get_soft_limits(
                     self._config.axis_no
+                )
+                perf.record(
+                    "lct.connect.status_check_ms",
+                    (time.perf_counter() - status_check_t0) * 1000,
                 )
                 self._connected = True
                 self._homed = False
@@ -434,6 +451,7 @@ class LctMotionBackend(MotionBackend):
         timeout_s: float,
         cancel_event=None,
         phase_name="",
+        velocity_um_s: float | None = None,
     ) -> int:
         """从start正向飞拍，越过end后再运动配置的末端余量。"""
 
@@ -470,12 +488,20 @@ class LctMotionBackend(MotionBackend):
                 ),
             }
 
-            velocity_um_s = (
-                velocity_um_s_by_phase.get(
-                    phase_name,
-                    self._config.scan_velocity_um_s,
+            if velocity_um_s is None:
+                velocity_um_s = (
+                    velocity_um_s_by_phase.get(
+                        phase_name,
+                        self._config.scan_velocity_um_s,
+                    )
                 )
-            )
+            else:
+                velocity_um_s = float(velocity_um_s)
+                if velocity_um_s <= 0:
+                    raise ValueError(
+                        "飞拍速度覆盖值必须大于0: "
+                        f"{velocity_um_s}"
+                    )
 
             velocity_counts_s = (
                     velocity_um_s
@@ -494,8 +520,15 @@ class LctMotionBackend(MotionBackend):
             deadline = time.monotonic() + timeout_s
             detail_t0 = time.perf_counter()
             detail_ct: dict[str, float] = {}
+            phase_key = phase_name or "default"
 
+            precheck_t0 = time.perf_counter()
             self._require_autofocus_ready()
+            perf.record(
+                f"lct.{phase_key}.precheck_ms",
+                (time.perf_counter() - precheck_t0) * 1000,
+                log=False,
+            )
             self._operation = "linear_fly_scan"
             try:
                 positioning_t0 = time.perf_counter()
@@ -545,15 +578,10 @@ class LctMotionBackend(MotionBackend):
             move_started = False
             try:
                 compare_config_t0 = time.perf_counter()
-                line_config = self._e4o4.configure_line_compare(
-                    slave_no=self._config.e4o4_slave_no,
-                    encoder_no=self._config.encoder_no,
-                    line_compare_no=self._config.line_compare_no,
-                    trigger_no=self._config.trigger_out_no,
-                    start_position=trigger_start,
-                    end_position=trigger_end,
-                    interval=step_counts,
-                    polarity=self._config.trigger_polarity,
+                line_config = self._configure_line_compare(
+                    trigger_start,
+                    trigger_end,
+                    step_counts,
                 )
                 detail_ct["compare_config_ms"] = (
                     time.perf_counter() - compare_config_t0
@@ -569,12 +597,20 @@ class LctMotionBackend(MotionBackend):
                 ) * 1000
 
                 scan_motion_t0 = time.perf_counter()
+                # 发令与等待分开计时：发令慢是通信问题，
+                # 等待慢是运动节拍本身。
+                move_issue_t0 = time.perf_counter()
                 self._m60.absolute_move(
                     self._config.axis_no,
                     motion_end_counts,
                     velocity_counts_s
                 )
+                perf.record(
+                    f"lct.{phase_key}.scan_move_issue_ms",
+                    (time.perf_counter() - move_issue_t0) * 1000,
+                )
                 move_started = True
+                scan_wait_t0 = time.perf_counter()
                 m60_final = self._m60.wait_motion_complete(
                     self._config.axis_no,
                     motion_end_counts,
@@ -582,25 +618,68 @@ class LctMotionBackend(MotionBackend):
                     self._config.position_tolerance_counts,
                     cancel_event=cancel_event,
                 )
+                perf.record(
+                    f"lct.{phase_key}.scan_wait_ms",
+                    (time.perf_counter() - scan_wait_t0) * 1000,
+                )
                 move_started = False
                 detail_ct["scan_motion_ms"] = (
                     time.perf_counter() - scan_motion_t0
                 ) * 1000
 
+                # 触发计数稳定等待：运动到位后 E4O4 计数刷新存在延迟，
+                # 轮询 get_trigger_count（纯读，无副作用）直到达到期望值，
+                # 上限 200ms，就绪即继续，不再固定睡 50ms
+                # （原固定等待见对焦CT拆解报告·发现四）。
+                # settle 与读数分开计时：settle 为扣除DLL读数后的纯等待。
                 trigger_verify_t0 = time.perf_counter()
-                time.sleep(0.05)
+                count_reads_ms = 0.0
+                settle_deadline = time.monotonic() + 0.2
+                while True:
+                    count_read_t0 = time.perf_counter()
+                    actual_count = self._e4o4.get_trigger_count(
+                        self._config.e4o4_slave_no,
+                        self._config.trigger_out_no,
+                    )
+                    count_reads_ms += (
+                        time.perf_counter() - count_read_t0
+                    ) * 1000
+                    if (
+                            actual_count
+                            >= line_config.expected_trigger_count
+                    ):
+                        break
+                    if time.monotonic() >= settle_deadline:
+                        break
+                    time.sleep(0.002)
+                settle_ms = (
+                    time.perf_counter()
+                    - trigger_verify_t0
+                    - count_reads_ms / 1000.0
+                ) * 1000
+                trigger_read_t0 = time.perf_counter()
                 e4o4_final = self._e4o4.get_encoder_position(
                     self._config.e4o4_slave_no,
                     self._config.encoder_no,
                 )
-                actual_count = self._e4o4.get_trigger_count(
-                    self._config.e4o4_slave_no,
-                    self._config.trigger_out_no,
+                perf.record(
+                    f"lct.{phase_key}.trigger_settle_ms",
+                    settle_ms,
+                )
+                perf.record(
+                    f"lct.{phase_key}.trigger_reads_ms",
+                    count_reads_ms
+                    + (time.perf_counter() - trigger_read_t0) * 1000,
+                    log=False,
                 )
                 detail_ct["trigger_verify_ms"] = (
                     time.perf_counter() - trigger_verify_t0
                 ) * 1000
                 if actual_count != line_config.expected_trigger_count:
+                    # 触发数不符往往意味着缓存与硬件已发散（如触发口
+                    # 被外部改写），失效缓存避免下一段fast继续命中、
+                    # 形成持续失败循环。
+                    self._e4o4.invalidate_comparator_cache()
                     raise LctStateError(
                         "E4O4线性飞拍触发数不符: "
                         f"expected={line_config.expected_trigger_count}, "
@@ -655,6 +734,19 @@ class LctMotionBackend(MotionBackend):
                     detail_ct.get("cleanup_ms", 0.0),
                     (time.perf_counter() - detail_t0) * 1000,
                 )
+                # detail_ct 整表入全局注册表；cleanup_ms 与搜索级
+                # 清理键重名，入表时改名为 cleanup_lct_ms。
+                perf.ingest(
+                    {
+                        (
+                            "cleanup_lct_ms"
+                            if key == "cleanup_ms"
+                            else key
+                        ): value
+                        for key, value in detail_ct.items()
+                    },
+                    prefix=f"lct.{phase_key}",
+                )
 
     def capture_at_position(
         self,
@@ -662,7 +754,13 @@ class LctMotionBackend(MotionBackend):
         timeout_s: float,
         cancel_event=None,
     ) -> int:
-        """从目标前方准备位置正向越过目标并触发一次。"""
+        """按配置方向越过目标并触发一次。
+
+        direction=0（正向）：从目标下方准备位置上越（历史行为）；
+        direction=1（反向）：从目标上方下越（PreCmp dir=1）。反向时
+        若轴已停在目标上方且余量足够（≥准备距离一半，足以加速到
+        扫描速度匀速越点），跳过准备定位直接从当前位置起扫。
+        """
 
         with self._lock:
             self._require_connected()
@@ -670,6 +768,7 @@ class LctMotionBackend(MotionBackend):
             if timeout_s <= 0:
                 raise ValueError(f"单点飞拍超时必须大于0: {timeout_s}")
 
+            reverse = self._config.single_capture_direction == 1
             target_counts = self._config.um_to_counts(position_um)
             approach_counts = self._config.um_to_counts(
                 self._config.single_capture_approach_um
@@ -677,8 +776,16 @@ class LctMotionBackend(MotionBackend):
             exit_counts = self._config.um_to_counts(
                 self._config.single_capture_exit_um
             )
-            prepare_counts = target_counts - approach_counts
-            finish_counts = target_counts + exit_counts
+            prepare_counts = (
+                target_counts + approach_counts
+                if reverse
+                else target_counts - approach_counts
+            )
+            finish_counts = (
+                target_counts - exit_counts
+                if reverse
+                else target_counts + exit_counts
+            )
             self._validate_target(prepare_counts)
             self._validate_target(target_counts)
             self._validate_target(finish_counts)
@@ -686,19 +793,62 @@ class LctMotionBackend(MotionBackend):
             detail_t0 = time.perf_counter()
             detail_ct: dict[str, float] = {}
 
+            precheck_t0 = time.perf_counter()
             self._require_autofocus_ready()
+            perf.record(
+                "lct.single.precheck_ms",
+                (time.perf_counter() - precheck_t0) * 1000,
+                log=False,
+            )
             self._operation = "single_capture"
             try:
                 positioning_t0 = time.perf_counter()
-                self._move_to(
-                    prepare_counts,
-                    self._config.positioning_velocity_counts_s,
-                    self._remaining(deadline),
-                    cancel_event,
+                current_counts = self._m60.get_actual_position(
+                    self._config.axis_no
                 )
-                detail_ct["positioning_ms"] = (
-                    time.perf_counter() - positioning_t0
-                ) * 1000
+                # 起始侧余量：已在扫描起始侧且离目标够远时直通起扫，
+                # 省掉一次折返准备定位（典型：反向档下精扫末端即起点）。
+                # 阈值取10µm而非准备距离的一半：飞拍速度提到匀速只需
+                # v²/2a≈4µm（500µm/s、a=31250µm/s²），且流程几何上
+                # 余量下限恒为20µm（best_f≤精扫窗上沿），25µm阈值会把
+                # 峰值贴窗顶的正常轮次误判回退。
+                min_clearance_counts = max(
+                    1, self._config.um_to_counts(10)
+                )
+                clearance_counts = (
+                    current_counts - target_counts
+                    if reverse
+                    else target_counts - current_counts
+                )
+                if clearance_counts >= min_clearance_counts:
+                    detail_ct["positioning_ms"] = (
+                        time.perf_counter() - positioning_t0
+                    ) * 1000
+                    logger.info(
+                        "单点飞拍直通：当前位置%d在目标%s侧余量%d count"
+                        "（≥%d），跳过准备定位",
+                        current_counts,
+                        "上" if reverse else "下",
+                        clearance_counts,
+                        min_clearance_counts,
+                    )
+                else:
+                    logger.info(
+                        "单点飞拍回退定位：余量%d count不足（<%d），"
+                        "先移动到准备位%d",
+                        clearance_counts,
+                        min_clearance_counts,
+                        prepare_counts,
+                    )
+                    self._move_to(
+                        prepare_counts,
+                        self._config.positioning_velocity_counts_s,
+                        self._remaining(deadline),
+                        cancel_event,
+                    )
+                    detail_ct["positioning_ms"] = (
+                        time.perf_counter() - positioning_t0
+                    ) * 1000
 
                 coordinate_t0 = time.perf_counter()
                 m60_prepare, e4o4_prepare = self._sample_coordinate_pair()
@@ -715,14 +865,9 @@ class LctMotionBackend(MotionBackend):
             move_started = False
             try:
                 compare_config_t0 = time.perf_counter()
-                pre_config = self._e4o4.configure_pre_compare(
-                    slave_no=self._config.e4o4_slave_no,
-                    encoder_no=self._config.encoder_no,
-                    precompare_no=self._config.precompare_no,
-                    trigger_no=self._config.trigger_out_no,
-                    positions=[trigger_position],
-                    direction=0,
-                    polarity=self._config.trigger_polarity,
+                pre_config = self._configure_pre_compare(
+                    trigger_position,
+                    1 if reverse else 0,
                 )
                 detail_ct["compare_config_ms"] = (
                     time.perf_counter() - compare_config_t0
@@ -738,12 +883,19 @@ class LctMotionBackend(MotionBackend):
                 ) * 1000
 
                 capture_motion_t0 = time.perf_counter()
+                # 与 linear_fly_scan 相同：发令 / 等待分开计时。
+                move_issue_t0 = time.perf_counter()
                 self._m60.absolute_move(
                     self._config.axis_no,
                     finish_counts,
                     self._config.scan_velocity_counts_s,
                 )
+                perf.record(
+                    "lct.single.scan_move_issue_ms",
+                    (time.perf_counter() - move_issue_t0) * 1000,
+                )
                 move_started = True
+                scan_wait_t0 = time.perf_counter()
                 self._m60.wait_motion_complete(
                     self._config.axis_no,
                     finish_counts,
@@ -751,21 +903,55 @@ class LctMotionBackend(MotionBackend):
                     self._config.position_tolerance_counts,
                     cancel_event=cancel_event,
                 )
+                perf.record(
+                    "lct.single.scan_wait_ms",
+                    (time.perf_counter() - scan_wait_t0) * 1000,
+                )
                 move_started = False
                 detail_ct["capture_motion_ms"] = (
                     time.perf_counter() - capture_motion_t0
                 ) * 1000
 
+                # 触发计数稳定等待：与 linear_fly_scan 相同的条件轮询
+                # （上限 200ms），就绪即继续，不再固定睡 50ms。
                 trigger_verify_t0 = time.perf_counter()
-                time.sleep(0.05)
-                actual_count = self._e4o4.get_trigger_count(
-                    self._config.e4o4_slave_no,
-                    self._config.trigger_out_no,
+                count_reads_ms = 0.0
+                settle_deadline = time.monotonic() + 0.2
+                while True:
+                    count_read_t0 = time.perf_counter()
+                    actual_count = self._e4o4.get_trigger_count(
+                        self._config.e4o4_slave_no,
+                        self._config.trigger_out_no,
+                    )
+                    count_reads_ms += (
+                        time.perf_counter() - count_read_t0
+                    ) * 1000
+                    if (
+                            actual_count
+                            >= pre_config.expected_trigger_count
+                    ):
+                        break
+                    if time.monotonic() >= settle_deadline:
+                        break
+                    time.sleep(0.002)
+                perf.record(
+                    "lct.single.trigger_settle_ms",
+                    (
+                        time.perf_counter()
+                        - trigger_verify_t0
+                        - count_reads_ms / 1000.0
+                    ) * 1000,
+                )
+                perf.record(
+                    "lct.single.trigger_reads_ms",
+                    count_reads_ms,
+                    log=False,
                 )
                 detail_ct["trigger_verify_ms"] = (
                     time.perf_counter() - trigger_verify_t0
                 ) * 1000
                 if actual_count != pre_config.expected_trigger_count:
+                    self._e4o4.invalidate_comparator_cache()
                     raise LctStateError(
                         "E4O4单点飞拍触发数不符: "
                         f"expected=1, actual={actual_count}"
@@ -792,10 +978,12 @@ class LctMotionBackend(MotionBackend):
                     self._safe_stop_axis()
                 self._operation = "idle"
                 logger.info(
-                    "LCT CT[single] | 准备定位 %.1fms | 坐标采样 %.1fms | "
+                    "LCT CT[single] | 方向 %s | 准备定位 %.1fms | "
+                    "坐标采样 %.1fms | "
                     "比较器配置 %.1fms | 比较器使能 %.1fms | "
                     "触发运动 %.1fms | 触发校验 %.1fms | "
                     "比较器清理 %.1fms | 总计 %.1fms",
+                    "反向" if reverse else "正向",
                     detail_ct.get("positioning_ms", 0.0),
                     detail_ct.get("coordinate_ms", 0.0),
                     detail_ct.get("compare_config_ms", 0.0),
@@ -804,6 +992,18 @@ class LctMotionBackend(MotionBackend):
                     detail_ct.get("trigger_verify_ms", 0.0),
                     detail_ct.get("cleanup_ms", 0.0),
                     (time.perf_counter() - detail_t0) * 1000,
+                )
+                # detail_ct 整表入全局注册表（cleanup_ms 改名防撞）。
+                perf.ingest(
+                    {
+                        (
+                            "cleanup_lct_ms"
+                            if key == "cleanup_ms"
+                            else key
+                        ): value
+                        for key, value in detail_ct.items()
+                    },
+                    prefix="lct.single",
                 )
 
     def _require_autofocus_ready(self) -> None:
@@ -815,6 +1015,63 @@ class LctMotionBackend(MotionBackend):
         )
         if not status.servo_enabled:
             raise LctSafetyError("伺服未使能，不能启动自动对焦")
+
+    def _configure_line_compare(
+        self,
+        trigger_start: int,
+        trigger_end: int,
+        step_counts: int,
+    ):
+        """按配置选择全量或增量路径配置线性比较器。"""
+
+        if self._config.e4o4_incremental_config:
+            return self._e4o4.configure_line_compare_fast(
+                slave_no=self._config.e4o4_slave_no,
+                encoder_no=self._config.encoder_no,
+                line_compare_no=self._config.line_compare_no,
+                trigger_no=self._config.trigger_out_no,
+                start_position=trigger_start,
+                end_position=trigger_end,
+                interval=step_counts,
+                polarity=self._config.trigger_polarity,
+            )
+        return self._e4o4.configure_line_compare(
+            slave_no=self._config.e4o4_slave_no,
+            encoder_no=self._config.encoder_no,
+            line_compare_no=self._config.line_compare_no,
+            trigger_no=self._config.trigger_out_no,
+            start_position=trigger_start,
+            end_position=trigger_end,
+            interval=step_counts,
+            polarity=self._config.trigger_polarity,
+        )
+
+    def _configure_pre_compare(
+        self,
+        trigger_position: int,
+        direction: int,
+    ):
+        """按配置选择全量或增量路径配置预设定比较器。"""
+
+        if self._config.e4o4_incremental_config:
+            return self._e4o4.configure_pre_compare_fast(
+                slave_no=self._config.e4o4_slave_no,
+                encoder_no=self._config.encoder_no,
+                precompare_no=self._config.precompare_no,
+                trigger_no=self._config.trigger_out_no,
+                positions=[trigger_position],
+                direction=direction,
+                polarity=self._config.trigger_polarity,
+            )
+        return self._e4o4.configure_pre_compare(
+            slave_no=self._config.e4o4_slave_no,
+            encoder_no=self._config.encoder_no,
+            precompare_no=self._config.precompare_no,
+            trigger_no=self._config.trigger_out_no,
+            positions=[trigger_position],
+            direction=direction,
+            polarity=self._config.trigger_polarity,
+        )
 
     def _validate_maintenance_motion_safety(self) -> None:
         """手动使能和回零前使用的第一版严格门禁。"""
@@ -932,27 +1189,54 @@ class LctMotionBackend(MotionBackend):
             raise TimeoutError("LCT动作总超时")
         return remaining
 
-    def _safe_disarm_line(self) -> None:
+    def _safe_disarm_line(self, full: bool = False) -> None:
+        """关断线性比较器；增量模式段间保留绑定，full=True完整解绑。"""
+
         try:
-            self._e4o4.disarm_line_compare(
-                self._config.e4o4_slave_no,
-                self._config.line_compare_no,
-                self._config.trigger_out_no,
-                self._config.trigger_polarity,
-            )
+            if (
+                self._config.e4o4_incremental_config
+                and not full
+            ):
+                self._e4o4.disarm_line_compare_keep_binding(
+                    self._config.e4o4_slave_no,
+                    self._config.line_compare_no,
+                )
+            else:
+                self._e4o4.disarm_line_compare(
+                    self._config.e4o4_slave_no,
+                    self._config.line_compare_no,
+                    self._config.trigger_out_no,
+                    self._config.trigger_polarity,
+                )
         except Exception:
             logger.exception("关闭E4O4线性比较器失败")
+            # 清理失败时硬件使能状态未知，失效缓存强制下一段走
+            # 全量路径重做SetEnable(0)，避免缓存带着错误armed标志
+            # 继续放行fast路径。
+            self._e4o4.invalidate_comparator_cache()
 
-    def _safe_disarm_pre(self) -> None:
+    def _safe_disarm_pre(self, full: bool = False) -> None:
+        """关断预设定比较器；增量模式段间保留绑定，full=True完整解绑。"""
+
         try:
-            self._e4o4.disarm_pre_compare(
-                self._config.e4o4_slave_no,
-                self._config.precompare_no,
-                self._config.trigger_out_no,
-                self._config.trigger_polarity,
-            )
+            if (
+                self._config.e4o4_incremental_config
+                and not full
+            ):
+                self._e4o4.disarm_pre_compare_keep_binding(
+                    self._config.e4o4_slave_no,
+                    self._config.precompare_no,
+                )
+            else:
+                self._e4o4.disarm_pre_compare(
+                    self._config.e4o4_slave_no,
+                    self._config.precompare_no,
+                    self._config.trigger_out_no,
+                    self._config.trigger_polarity,
+                )
         except Exception:
             logger.exception("关闭E4O4预设定比较器失败")
+            self._e4o4.invalidate_comparator_cache()
 
     def _safe_stop_axis(self) -> None:
         try:
@@ -1004,8 +1288,9 @@ class LctMotionBackend(MotionBackend):
 
     def _cleanup_partial_connection(self) -> None:
         if self._e4o4.is_connected:
-            self._safe_disarm_line()
-            self._safe_disarm_pre()
+            # 断开连接走完整解绑（增量模式也不保留绑定）。
+            self._safe_disarm_line(full=True)
+            self._safe_disarm_pre(full=True)
             self._e4o4.close()
 
         if self._m60.ecat_connected:
@@ -1017,3 +1302,12 @@ class LctMotionBackend(MotionBackend):
             except Exception:
                 logger.exception("清理M60运动状态失败")
         self._m60.close()
+
+
+# ── CT 类级插桩 ──
+# 给 LctMotionBackend 全部公开方法（connect/get_state/move_to_position/
+# home/linear_fly_scan/capture_at_position/cancel_current_motion 等）套
+# 计时壳：每次调用进 perf 注册表，默认静默，单次 ≥200ms 打 [CT][慢]。
+# 方法内部的细分耗时（飞拍各段）由函数体内的 perf.record 单独记录，
+# 两者键名不同、互不覆盖。
+perf.instrument_class(LctMotionBackend, "lct", slow_ms=200.0)

@@ -21,6 +21,7 @@ class ApplicationShutdownService(QObject):
         live_view_service,
         focus_task_service,
         motion_service,
+        camera_service,
         controller,
         message_fn,
         status_fn,
@@ -31,6 +32,7 @@ class ApplicationShutdownService(QObject):
         self._live_view_service = live_view_service
         self._focus_task_service = focus_task_service
         self._motion_service = motion_service
+        self._camera_service = camera_service
         self._controller = controller
         self._message_fn = message_fn
         self._status_fn = status_fn
@@ -53,6 +55,10 @@ class ApplicationShutdownService(QObject):
             Qt.QueuedConnection,
         )
         self._motion_service.settled.connect(
+            self._on_dependency_settled,
+            Qt.QueuedConnection,
+        )
+        self._camera_service.settled.connect(
             self._on_dependency_settled,
             Qt.QueuedConnection,
         )
@@ -118,6 +124,15 @@ class ApplicationShutdownService(QObject):
                 "[提示] 运动控制器连接线程尚未完全停止，"
                 "连接任务结束后窗口将自动关闭",
                 "正在停止运动控制器连接任务，完成后将自动关闭",
+            )
+            return False
+
+        # 第五步：释放常驻相机句柄。
+        if not self._camera_service.shutdown():
+            self._defer(
+                "[提示] 相机连接线程尚未完全停止，"
+                "连接任务结束后窗口将自动关闭",
+                "正在停止相机连接任务，完成后将自动关闭",
             )
             return False
 

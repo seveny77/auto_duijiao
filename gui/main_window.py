@@ -14,6 +14,7 @@ from gui.app.services.controller import AppController
 from gui.app.services.ct_logger import CtLogger
 from gui.app.services.result_presenter import ResultPresenter
 from gui.app.services.motion_service import MotionService
+from gui.app.services.camera_service import CameraService
 from gui.app.services.live_view_service import LiveViewService
 from gui.app.services.focus_task_service import FocusTaskService
 from gui.app.services.focus_run_service import FocusRunService
@@ -98,6 +99,7 @@ class MainWindow(QMainWindow):
             image_widget=self.image_widget,
             live_btn=self.image_widget.live_btn,
             status_fn=self.status_message.emit,
+            camera_fn=lambda: self.camera_service.camera,
         )
 
         self.config_service = ConfigService(
@@ -120,6 +122,11 @@ class MainWindow(QMainWindow):
             axis_label=self.param_panel.motion_axis_label,
             position_label=self.param_panel.motion_position_label,
         )
+        self.camera_service = CameraService(
+            connect_btn=self.param_panel.camera_connect_btn,
+            status_fn=self.status_message.emit,
+            connection_label=self.param_panel.camera_connection_label,
+        )
         self.focus_run_service = FocusRunService(
             config_service=self.config_service,
             controller=self.controller,
@@ -130,6 +137,7 @@ class MainWindow(QMainWindow):
             stroke_range_fn=lambda: self.motion_service.stroke_range,
             motion_backend_fn=lambda: self.motion_service.backend,
             motion_state_fn=lambda: self.motion_service.state,
+            camera_fn=lambda: self.camera_service.camera,
             confirm_fn=self._confirm_motion,
             status_fn=self.status_message.emit,
         )
@@ -138,6 +146,7 @@ class MainWindow(QMainWindow):
             live_view_service=self.live_view_service,
             focus_task_service=self.focus_task_service,
             motion_service=self.motion_service,
+            camera_service=self.camera_service,
             controller=self.controller,
             message_fn=self._log,
             status_fn=self.status_message.emit,
@@ -155,6 +164,9 @@ class MainWindow(QMainWindow):
         self.status_message.connect(self._show_status) #更新状态栏
         self.param_panel.motion_connect_btn.clicked.connect(
             self._on_motion_connect
+        )
+        self.param_panel.camera_connect_btn.clicked.connect(
+            self._on_camera_connect
         )
         self.param_panel.motion_reset_btn.clicked.connect(
             lambda _checked=False: self.motion_service.clear_alarm()
@@ -239,6 +251,26 @@ class MainWindow(QMainWindow):
             return
 
         self.motion_service.toggle(config)
+
+    def _on_camera_connect(self):
+        """把用户的相机连接或断开请求交给CameraService。"""
+
+        # 实时预览正在占用相机时，连接会因独占访问失败、
+        # 断开会破坏预览线程正在使用的句柄，两种都先拒绝。
+        if (
+            self.live_view_service.is_active
+            or self.live_view_service.is_running
+        ):
+            self.status_message.emit("请先停止实时预览，再连接或断开相机")
+            QMessageBox.warning(
+                self,
+                "实时预览正在运行",
+                "实时预览正在占用相机，请先停止实时预览。",
+            )
+            return
+
+        # GUI当前没有相机索引设置项，与FocusConfig默认值保持一致。
+        self.camera_service.toggle(0)
 
     def _on_motion_servo(self):
         """手动使能前二次确认；去使能直接执行。"""

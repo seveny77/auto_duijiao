@@ -187,6 +187,15 @@ class HikCamera:
             self._model_name(),
         )
 
+    @property
+    def is_connected(self) -> bool:
+        """相机句柄是否处于打开状态。
+
+        只反映 Python 侧的句柄归属，不发起 SDK 调用，
+        供 GUI 连接状态判断和任务启动前校验使用。
+        """
+        return self._cam is not None
+
     def close(self):
         """关闭相机设备并销毁 SDK 句柄。
 
@@ -1342,3 +1351,14 @@ class HikCamera:
             "callback registered (Ex)"
         )
         return True
+
+
+# ── CT 类级插桩 ──
+# HikCamera 每个 SDK 往返方法（open/close/set_roi/set_exposure/
+# set_trigger_mode/start_grabbing 等）计时入 perf 注册表，单次 ≥100ms
+# 打 [CT][慢]。get_frame 本身是阻塞等帧，耗时无诊断意义，排除。
+import perf as _perf
+
+_perf.instrument_class(
+    HikCamera, "hw.cam", slow_ms=100.0, exclude={"get_frame"}
+)

@@ -96,6 +96,7 @@ class FakeMotionBackend:
         timeout_s: float,
         cancel_event=None,
         phase_name: str = "",
+        velocity_um_s: float = None,
     ) -> int:
         if step_um <= 0 or end_um <= start_um:
             raise ValueError("模拟飞拍区间或步距无效")
@@ -103,6 +104,7 @@ class FakeMotionBackend:
         if span_um % step_um != 0:
             raise ValueError("模拟飞拍区间必须是步距的整数倍")
         self.last_flyscan = (start_um, end_um, step_um)
+        self.last_flyscan_velocity_um_s = velocity_um_s
         self._position_um = float(end_um)
         time.sleep(0.05)
         return span_um // step_um

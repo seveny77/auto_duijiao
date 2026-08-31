@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 
@@ -6,6 +7,9 @@ import cv2
 
 from PyQt5.QtCore import QObject, pyqtSignal
 from backend.camera_utils import set_coarse_frame
+
+logger = logging.getLogger(__name__)
+
 class LiveViewWorker(QObject):
     frame = pyqtSignal(object)
     state = pyqtSignal(str)
@@ -13,12 +17,15 @@ class LiveViewWorker(QObject):
     settled = pyqtSignal() #退出阻断信号
 
 
-    def __init__(self, source:str,project_root:str,stop_event,camera_params: dict = None):
+    def __init__(self, source:str,project_root:str,stop_event,
+                 camera_params: dict = None, camera=None):
         super().__init__()
         self._source = source
         self._project_root = project_root
         self._stop = stop_event   # threading.Event：GUI 置位来停止
         self._cam_params = camera_params or {}  # 相机参数（曝光/增益/Binning）
+        # CameraService的常驻相机句柄；None时预览自开自关。
+        self._camera = camera
 
     def start(self):
         """运行实时预览任务。
@@ -105,16 +112,22 @@ class LiveViewWorker(QObject):
             time.sleep(0.05)
 
     def _run_real(self):
-        """运行真实相机预览，并保证相机最终一定关闭。"""
-
-        from camera import HikCamera
+        """运行真实相机预览；借用常驻句柄时只停流，不关闭相机。"""
 
         self.state.emit("connecting")
 
-        # 先创建 Python 相机对象。
-        #
-        # 此时只是创建包装对象，还没有真正打开硬件相机。
-        cam = HikCamera(0)
+        # GUI已手动连接相机时直接借用常驻句柄（相机以独占方式
+        # 打开，第二个 HikCamera(0).open() 必然失败）；否则走
+        # 自开自关的旧路径。
+        borrowed = self._camera is not None
+        cam = self._camera
+        if not borrowed:
+            from camera import HikCamera
+
+            # 先创建 Python 相机对象。
+            #
+            # 此时只是创建包装对象，还没有真正打开硬件相机。
+            cam = HikCamera(0)
 
         try:
             # 如果连接相机之前已经收到停止请求，
@@ -122,7 +135,12 @@ class LiveViewWorker(QObject):
             if self._stop.is_set():
                 return
 
-            cam.open()
+            if not borrowed:
+                cam.open()
+            else:
+                # 防御：上一轮任务异常退出时常驻句柄可能仍在取流，
+                # 而set_coarse_frame等参数下发要求非取流状态。
+                cam.stop_grabbing()
 
             # 应用 GUI 中设置的曝光和增益。
             cam.set_exposure(
@@ -154,7 +172,7 @@ class LiveViewWorker(QObject):
             # 如果停止请求是在相机初始化过程中到达的，
             # 就不要再启动取流。
             #
-            # 函数 return 以后，下面的 finally 仍然会关闭相机。
+            # 函数 return 以后，下面的 finally 仍然会收尾相机。
             if self._stop.is_set():
                 return
 
@@ -169,16 +187,23 @@ class LiveViewWorker(QObject):
                 time.sleep(0.05)
 
         finally:
-            # close() 内部已经包含：
-            #
-            #   正在取流时调用 stop_grabbing()
-            #       ↓
-            #   CloseDevice()
-            #       ↓
-            #   DestroyHandle()
-            #
-            # 所以这里不需要先单独调用 stop_grabbing()。
-            cam.close()
+            if not borrowed:
+                # close() 内部已经包含：
+                #
+                #   正在取流时调用 stop_grabbing()
+                #       ↓
+                #   CloseDevice()
+                #       ↓
+                #   DestroyHandle()
+                #
+                # 所以这里不需要先单独调用 stop_grabbing()。
+                cam.close()
+            else:
+                # 常驻句柄属于CameraService，只停流并归还。
+                try:
+                    cam.stop_grabbing()
+                except Exception:
+                    logger.exception("实时预览结束停止取流失败")
 
     def _on_camera_frame(self, img):
         """SDK 回调线程里执行：只发信号，绝不碰界面。"""

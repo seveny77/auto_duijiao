@@ -22,6 +22,7 @@ class FocusRunService:
             stroke_range_fn,
             motion_backend_fn,
             motion_state_fn,
+            camera_fn,
             confirm_fn,
             status_fn,
     ):
@@ -34,6 +35,7 @@ class FocusRunService:
         self._stroke_range_fn = stroke_range_fn
         self._motion_backend_fn = motion_backend_fn
         self._motion_state_fn = motion_state_fn
+        self._camera_fn = camera_fn
         self._confirm_fn = confirm_fn
         self._status_fn = status_fn
 
@@ -51,6 +53,8 @@ class FocusRunService:
         if cfg.mode == "real":
             # MotionService拥有连接的生命周期；后台任务只借用它。
             cfg.motion_backend = self._motion_backend_fn()
+            # CameraService拥有相机句柄的生命周期；任务同样只借用。
+            cfg.camera = self._camera_fn()
 
         # 在创建后台线程、连接相机和触发运动之前校验参数。
         errors, warnings = self._validate_config(cfg)
@@ -228,6 +232,12 @@ class FocusRunService:
                         errors.append("伺服轴掉线，无法执行自动对焦")
                     elif not state.ready_for_autofocus:
                         errors.append(state.message or "运动控制器尚未就绪")
+
+            # 相机与运动控制器同一模式：真实任务必须先手动连接，
+            # 句柄由CameraService常驻持有，任务只借用。
+            camera = cfg.camera
+            if camera is None or not camera.is_connected:
+                errors.append("请先连接相机（相机参数组中的“连接相机”）")
 
         if cfg.mode == "real" and stroke_range is not None:
             stroke_min, stroke_max = stroke_range
