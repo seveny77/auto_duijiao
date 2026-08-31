@@ -1,0 +1,110 @@
+{
+  "enabled": true,
+  "model_path": "C:\\Autofocus\\model\\best - 0830.pt",
+  "inference_imgsz": 4096,
+  "inference_confidence_floor": 0.1,
+  "mm_per_pixel": 0.24,
+  "history_root": "inspection_history",
+  "circle": {
+    "downsample_factor": 4,
+    "blur_kernel_size": 9,
+    "hough_dp": 1.2,
+    "hough_param1": 100.0,
+    "hough_param2": 30.0,
+    "min_center_distance_px": 100.0,
+    "min_radius_px": 100,
+    "max_radius_px": 2000,
+    "expected_circle_count": 1,
+    "min_candidate_score": 0.5
+  },
+  "region_rules": [
+    {
+      "region_id": "region_1",
+      "region_name": "A",
+      "inner_radius_mm": 0.0,
+      "outer_radius_mm": 12.5,
+      "class_id": 0,
+      "class_name": "异物",
+      "min_confidence": 0.0,
+      "min_instance_area_mm2": 0.0,
+      "max_instance_count": 0
+    },
+    {
+      "region_id": "region_1",
+      "region_name": "A",
+      "inner_radius_mm": 0.0,
+      "outer_radius_mm": 12.5,
+      "class_id": 1,
+      "class_name": "脏污",
+      "min_confidence": 0.0,
+      "min_instance_area_mm2": 0.0,
+      "max_instance_count": 0
+    },
+    {
+      "region_id": "region_2",
+      "region_name": "B",
+      "inner_radius_mm": 12.5,
+      "outer_radius_mm": 60.0,
+      "class_id": 0,
+      "class_name": "异物",
+      "min_confidence": 0.0,
+      "min_instance_area_mm2": 0.0,
+      "max_instance_count": 0
+    },
+    {
+      "region_id": "region_2",
+      "region_name": "B",
+      "inner_radius_mm": 12.5,
+      "outer_radius_mm": 60.0,
+      "class_id": 1,
+      "class_name": "脏污",
+      "min_confidence": 0.0,
+      "min_instance_area_mm2": 0.0,
+      "max_instance_count": 0
+    },
+    {
+      "region_id": "region_3",
+      "region_name": "C",
+      "inner_radius_mm": 60.0,
+      "outer_radius_mm": 65.0,
+      "class_id": 0,
+      "class_name": "异物",
+      "min_confidence": 0.0,
+      "min_instance_area_mm2": 0.0,
+      "max_instance_count": 0
+    },
+    {
+      "region_id": "region_3",
+      "region_name": "C",
+      "inner_radius_mm": 60.0,
+      "outer_radius_mm": 65.0,
+      "class_id": 1,
+      "class_name": "脏污",
+      "min_confidence": 0.0,
+      "min_instance_area_mm2": 0.0,
+      "max_instance_count": 0
+    },
+    {
+      "region_id": "region_4",
+      "region_name": "D",
+      "inner_radius_mm": 65.0,
+      "outer_radius_mm": 75.0,
+      "class_id": 0,
+      "class_name": "异物",
+      "min_confidence": 0.0,
+      "min_instance_area_mm2": 0.0,
+      "max_instance_count": 0
+    },
+    {
+      "region_id": "region_4",
+      "region_name": "D",
+      "inner_radius_mm": 65.0,
+      "outer_radius_mm": 75.0,
+      "class_id": 1,
+      "class_name": "脏污",
+      "min_confidence": 0.0,
+      "min_instance_area_mm2": 0.0,
+      "max_instance_count": 0
+    }
+  ]
+}
