@@ -1310,3 +1310,12 @@ class M60Api:
             error_code=result,
             detail=detail,
         )
+
+
+# ── CT 类级插桩 ──
+# M60 每个 DLL 往返方法（absolute_move/wait_motion_complete/get_axis_status/
+# servo_on 等）计时入 perf 注册表。默认静默；单次 ≥100ms 打 [CT][慢]。
+# wait_motion_complete 内部 20ms 轮询，耗时长属正常，仅注册供统计。
+import perf as _perf
+
+_perf.instrument_class(M60Api, "hw.m60", slow_ms=100.0)

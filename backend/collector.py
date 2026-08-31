@@ -89,10 +89,23 @@ class PhaseCollector:
         # 因而不会给相机 SDK 回调增加额外负担。
         self._timings_ms: Dict[str, float] = {}
 
+        # ── 帧级 CT 采集 ──
+        # start() 调用时刻（perf_counter 域），first/last_frame_ms 以此为原点。
+        self._t0_frames = None
+        # 相机回调线程里打的两个时间戳。
+        # 设计说明：这里刻意只用两次 perf_counter() 赋值（约百纳秒级），
+        # 不做任何 I/O 或统计计算，不会拖慢 SDK 回调线程。
+        self._first_frame_ts = None
+        self._last_frame_ts = None
+        # 评价 Worker 线程里累计的单帧评价耗时。
+        self._eval_ms_total = 0.0
+        self._eval_n = 0
+
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
 
     def start(self):
+        self._t0_frames = time.perf_counter()
         self._cam.set_trigger_mode("hardware")
         self._cam.register_frame_callback(self._on_frame)
         self._cam.start_grabbing()
@@ -221,6 +234,28 @@ class PhaseCollector:
     def image(self, seq: int):
         with self._lock:
             return self._images.get(seq)
+
+    def frame_timings(self) -> Dict[str, float]:
+        """帧级 CT 快照：首/末帧到达时刻与评价线程累计耗时。
+
+        供 run_phase 记入 perf 注册表；无帧时返回空 dict。
+        """
+        with self._lock:
+            out: Dict[str, float] = {}
+            if self._t0_frames is not None:
+                if self._first_frame_ts is not None:
+                    out["first_frame_ms"] = (
+                        self._first_frame_ts - self._t0_frames
+                    ) * 1000
+                if self._last_frame_ts is not None:
+                    out["last_frame_ms"] = (
+                        self._last_frame_ts - self._t0_frames
+                    ) * 1000
+            if self._eval_n:
+                out["eval_total_ms"] = self._eval_ms_total
+                out["eval_avg_ms"] = self._eval_ms_total / self._eval_n
+            return out
+
     #相机回调线程
     def _on_frame(self, img):
         """相机 SDK 回调：把图像快速放入评价队列。"""
@@ -228,6 +263,12 @@ class PhaseCollector:
         # stop() 设置停止标记后，不再接收新的图片。
         if self._stop.is_set():
             return
+
+        # 帧级 CT：记录首/末帧到达时间戳（详见 __init__ 的设计说明）。
+        now = time.perf_counter()
+        if self._first_frame_ts is None:
+            self._first_frame_ts = now
+        self._last_frame_ts = now
 
         # 分配相机回调序号，并统计实际收到的帧数。
         #
@@ -317,11 +358,16 @@ class PhaseCollector:
             except queue.Empty:
                 continue
             try:
+                eval_t0 = time.perf_counter()
                 score = self._eval.evaluate_image(
                     img,
                     self._evaluation_roi,
                 )
                 with self._lock:
+                    self._eval_ms_total += (
+                        time.perf_counter() - eval_t0
+                    ) * 1000
+                    self._eval_n += 1
                     self._scores[seq] = score
                     if self._keep_images:
                         self._images[seq] = img

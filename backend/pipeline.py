@@ -12,6 +12,8 @@ from typing import (
 import cv2
 import numpy as np
 
+import perf
+
 from adapters.evaluator_opencv import (
     OpenCVSharpnessEvaluator,
 )
@@ -166,25 +168,17 @@ def run_phase(
                 f"处理={stats['processed']}"
             )
 
-        # 正常路径下快速确认三次。
-        #
-        # 如果processed一直等于E4O4返回的触发数，并且队列为空，
-        # 说明所有帧已经完成评价，不必进入后面的完整稳定期。
+        # 条件等待：collector.wait() 返回 True 时已保证 processed >= count，
+        # 且CT实测正常路径下帧评价在运动期间就全部完成，这里先查条件、
+        # 满足即立刻继续，不再固定睡 3×20ms（拆解报告·发现四）。
         stabilize_t0 = time.perf_counter()
-        fast_ok = True
-        for _ in range(3):
-            if cancel_event is not None and cancel_event.is_set():
-                raise RuntimeError("用户取消")
-            time.sleep(0.02)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("用户取消")
 
-            if (
-                    collector.processed != count
-                    or not collector.queue_empty()
-            ):
-                fast_ok = False
-                break
-
-        if not fast_ok:
+        if (
+                collector.processed != count
+                or not collector.queue_empty()
+        ):
             # 如果仍有帧进入或队列仍在变化，
             # 最多等待两秒，直到处理数量稳定至少 0.2 秒。
             deadline = time.monotonic() + 2.0
@@ -245,6 +239,25 @@ def run_phase(
             ) * 1000,
         })
 
+        # 逐环节 CT：阶段键与帧级键（首/末帧到达、评价耗时）
+        # 记入全局注册表，测试脚本与 [CT] 汇总日志都从这里取数。
+        perf.ingest(
+            {
+                "collector_start_ms": collector_start_ms,
+                "motion_ms": motion_ms,
+                "frame_wait_ms": frame_wait_ms,
+                "stabilize_ms": stabilize_ms,
+                "phase_total_ms": (
+                    time.perf_counter() - phase_t0
+                ) * 1000,
+            },
+            prefix=f"phase.{phase_name}",
+        )
+        perf.ingest(
+            collector.frame_timings(),
+            prefix=f"phase.{phase_name}",
+        )
+
         # 只有完整成功时，才把仍然可供读取分数和图像的
         # Collector 交给调用方。
         #
@@ -299,9 +312,20 @@ def run_search(cfg) -> int:
             action="search",
             error=error_message,
         )
+    logger.info(
+        "════ 对焦搜索开始 mode=%s strategy=%s template=%s ════",
+        cfg.mode,
+        cfg.strategy,
+        cfg.template,
+    )
+    template_load_t0 = time.perf_counter()
     template = FocusTemplate.load(cfg.template)
 
     ct = {}                     # 各阶段耗时统计（ms）
+    ct["template_load_ms"] = perf.record(
+        "template_load_ms",
+        (time.perf_counter() - template_load_t0) * 1000,
+    )
     t_total = time.perf_counter()
 
     search_start = cfg.search_start_um
@@ -328,6 +352,8 @@ def run_search(cfg) -> int:
     else:
         motion = cfg.motion_backend
         cam = None
+        # True=借用GUI常驻句柄（任务结束后保持打开），False=自开自关。
+        borrowed_camera = False
 
     try:
         if not sim:
@@ -338,10 +364,17 @@ def run_search(cfg) -> int:
                     "请先在GUI中连接M60 + E4O4"
                 )
             motion.prepare_new_task()
-            cam = HikCamera(cfg.camera_index)
             evaluator = OpenCVSharpnessEvaluator()
             t0 = time.perf_counter()
-            cam.open()
+            if cfg.camera is not None:
+                # 常驻相机：只借用句柄，省掉每轮~500ms的open；
+                # 防御性停流，上一轮异常退出时句柄可能仍在取流。
+                cam = cfg.camera
+                borrowed_camera = True
+                cam.stop_grabbing()
+            else:
+                cam = HikCamera(cfg.camera_index)
+                cam.open()
             cam.set_exposure(cfg.coarse_exposure_us or cfg.exposure_us)
             cam.set_gain(cfg.gain_db)
             sensor_size = set_coarse_frame(
@@ -349,7 +382,10 @@ def run_search(cfg) -> int:
                 cfg.coarse_downsample,
                 cfg.coarse_binning,
             )
-            ct["camera_setup_ms"] = (time.perf_counter() - t0) * 1000
+            ct["camera_setup_ms"] = perf.record(
+                "camera_setup_ms",
+                (time.perf_counter() - t0) * 1000,
+            )
             if not cfg.yes:
                 ans = input(
                     "⚠️  即将触发轴卡粗扫飞拍"
@@ -377,13 +413,20 @@ def run_search(cfg) -> int:
         )
         t0 = time.perf_counter()
         pred = strategy.predict_peak(ctx)
-        ct["predict_ms"] = (time.perf_counter() - t0) * 1000
+        ct["predict_ms"] = perf.record(
+            "predict_ms",
+            (time.perf_counter() - t0) * 1000,
+        )
         strategy_ct = pred.extra.get("ct_ms", {})
         if isinstance(strategy_ct, dict):
-            ct.update({
+            merged_strategy_ct = {
                 str(name): float(value)
                 for name, value in strategy_ct.items()
-            })
+            }
+            ct.update(merged_strategy_ct)
+            # 粗扫各环节（motion/等帧/稳定期/NCC）逐条打 [CT] 日志。
+            for name, value in merged_strategy_ct.items():
+                perf.record(name, value)
         predicted_peak_um = pred.peak_um
         ncc_max = pred.ncc_max
         quality = pred.quality
@@ -429,7 +472,10 @@ def run_search(cfg) -> int:
                 model=cfg.detect_model_obj,
                 sensor_size=sensor_size,
             )
-            ct["yolo_ms"] = (time.perf_counter() - t0) * 1000
+            ct["yolo_ms"] = perf.record(
+                "yolo_ms",
+                (time.perf_counter() - t0) * 1000,
+            )
         logger.info(
             "ROI: %s（来源: %s）",
             roi,
@@ -460,7 +506,10 @@ def run_search(cfg) -> int:
                 set_full_frame(cam, 1)
                 cam.set_roi(*roi)
                 cam.set_exposure(cfg.exposure_us)
-                ct["fine_switch_ms"] = (time.perf_counter() - t0) * 1000
+                ct["fine_switch_ms"] = perf.record(
+                    "fine_switch_ms",
+                    (time.perf_counter() - t0) * 1000,
+                )
             logger.info(
                 "AI策略最终位置=%sµm，不执行NCC精扫",
                 final_position_um,
@@ -501,7 +550,10 @@ def run_search(cfg) -> int:
                 set_full_frame(cam, cfg.fine_binning)
                 cam.set_roi(*roi)
                 cam.set_exposure(cfg.exposure_us)
-                ct["fine_switch_ms"] = (time.perf_counter() - t0) * 1000
+                ct["fine_switch_ms"] = perf.record(
+                    "fine_switch_ms",
+                    (time.perf_counter() - t0) * 1000,
+                )
 
             t0 = time.perf_counter()
             col_f, count_f, dur_f = run_phase(
@@ -517,19 +569,26 @@ def run_search(cfg) -> int:
                 preview_interval_s=cfg.preview_interval_s,
                 phase_name="fine",
             )
-            ct["fine_ms"] = (time.perf_counter() - t0) * 1000
+            ct["fine_ms"] = perf.record(
+                "fine_ms",
+                (time.perf_counter() - t0) * 1000,
+            )
             fine_phase_ct = col_f.timings()
-            ct["fine_collector_start_ms"] = (
-                fine_phase_ct.get("collector_start_ms", 0.0)
+            ct["fine_collector_start_ms"] = perf.record(
+                "fine_collector_start_ms",
+                fine_phase_ct.get("collector_start_ms", 0.0),
             )
-            ct["fine_motion_ms"] = (
-                fine_phase_ct.get("motion_ms", 0.0)
+            ct["fine_motion_ms"] = perf.record(
+                "fine_motion_ms",
+                fine_phase_ct.get("motion_ms", 0.0),
             )
-            ct["fine_frame_wait_ms"] = (
-                fine_phase_ct.get("frame_wait_ms", 0.0)
+            ct["fine_frame_wait_ms"] = perf.record(
+                "fine_frame_wait_ms",
+                fine_phase_ct.get("frame_wait_ms", 0.0),
             )
-            ct["fine_stabilize_ms"] = (
-                fine_phase_ct.get("stabilize_ms", 0.0)
+            ct["fine_stabilize_ms"] = perf.record(
+                "fine_stabilize_ms",
+                fine_phase_ct.get("stabilize_ms", 0.0),
             )
             fine_map = col_f.scores()
             fine_scores = [fine_map.get(i) for i in range(count_f)]
@@ -559,23 +618,32 @@ def run_search(cfg) -> int:
         if col_f is not None:
             fine_stop_t0 = time.perf_counter()
             col_f.stop()
-            ct["fine_stop_ms"] = (
-                time.perf_counter() - fine_stop_t0
-            ) * 1000
+            ct["fine_stop_ms"] = perf.record(
+                "fine_stop_ms",
+                (
+                    time.perf_counter() - fine_stop_t0
+                ) * 1000,
+            )
         if not sim:
             final_switch_t0 = time.perf_counter()
             set_full_frame(cam, 1)
-            ct["final_switch_ms"] = (
-                time.perf_counter() - final_switch_t0
-            ) * 1000
+            ct["final_switch_ms"] = perf.record(
+                "final_switch_ms",
+                (
+                    time.perf_counter() - final_switch_t0
+                ) * 1000,
+            )
 
             final_collector_start_t0 = time.perf_counter()
             final_col = PhaseCollector(cam, evaluator, save_dir=cfg.save_dir, start_index=200)
             final_col.start()
-            ct["final_collector_start_ms"] = (
-                time.perf_counter()
-                - final_collector_start_t0
-            ) * 1000
+            ct["final_collector_start_ms"] = perf.record(
+                "final_collector_start_ms",
+                (
+                    time.perf_counter()
+                    - final_collector_start_t0
+                ) * 1000,
+            )
 
         single_capture_t0 = time.perf_counter()
         final_trigger_count = motion.capture_at_position(
@@ -583,9 +651,12 @@ def run_search(cfg) -> int:
             timeout_s=cfg.flyscan_timeout,
             cancel_event=cancel,
         )
-        ct["single_capture_ms"] = (
-            time.perf_counter() - single_capture_t0
-        ) * 1000
+        ct["single_capture_ms"] = perf.record(
+            "single_capture_ms",
+            (
+                time.perf_counter() - single_capture_t0
+            ) * 1000,
+        )
         if final_trigger_count != 1:
             raise RuntimeError(
                 "最佳位置单点飞拍触发数异常: "
@@ -598,10 +669,13 @@ def run_search(cfg) -> int:
                 if final_col.processed >= 1:
                     break
                 time.sleep(0.02)
-            ct["final_frame_wait_ms"] = (
-                time.perf_counter()
-                - final_frame_wait_t0
-            ) * 1000
+            ct["final_frame_wait_ms"] = perf.record(
+                "final_frame_wait_ms",
+                (
+                    time.perf_counter()
+                    - final_frame_wait_t0
+                ) * 1000,
+            )
 
             if final_col.processed >= 1:
                 final_img = final_col.image(0)
@@ -613,9 +687,10 @@ def run_search(cfg) -> int:
 
             final_stop_t0 = time.perf_counter()
             final_col.stop()
-            ct["final_stop_ms"] = (
-                time.perf_counter() - final_stop_t0
-            ) * 1000
+            ct["final_stop_ms"] = perf.record(
+                "final_stop_ms",
+                (time.perf_counter() - final_stop_t0) * 1000,
+            )
             final_col = None
         else:
             logger.info(
@@ -635,7 +710,10 @@ def run_search(cfg) -> int:
             timeout_s=cfg.flyscan_timeout,
             cancel_event=cancel,
         )
-        ct["final_hold_ms"] = (time.perf_counter() - hold_t0) * 1000
+        ct["final_hold_ms"] = perf.record(
+            "final_hold_ms",
+            (time.perf_counter() - hold_t0) * 1000,
+        )
         logger.info(
             "最终定位完成：实际=%sµm，伺服保持=%s",
             final_state.position_um
@@ -644,8 +722,14 @@ def run_search(cfg) -> int:
             getattr(final_state, "servo_enabled", True),
         )
 
-        ct["final_ms"] = (time.perf_counter() - t0) * 1000
-        ct["total_ms"] = (time.perf_counter() - t_total) * 1000
+        ct["final_ms"] = perf.record(
+            "final_ms",
+            (time.perf_counter() - t0) * 1000,
+        )
+        ct["total_ms"] = perf.record(
+            "total_ms",
+            (time.perf_counter() - t_total) * 1000,
+        )
 
         if cfg.strategy == "dl":
             logger.info(
@@ -721,6 +805,7 @@ def run_search(cfg) -> int:
             error=error_message,
         )
     finally:
+        cleanup_t0 = time.perf_counter()
         if final_col is not None:
             try:
                 final_col.stop()
@@ -741,7 +826,9 @@ def run_search(cfg) -> int:
 
         if cam is not None:
             try:
-                cam.close()
+                # 常驻相机由GUI CameraService持有，任务只借用，不关闭。
+                if not borrowed_camera:
+                    cam.close()
 
             except Exception as cleanup_error:
                 logger.warning(
@@ -750,6 +837,18 @@ def run_search(cfg) -> int:
                 )
 
         # 运动后端由GUI MotionService持有，不在单次任务后断开。
+
+        # 清理段（停采集器+关相机）也计入 CT；total_ms 不含它，
+        # total_with_cleanup_ms 才是对外可见的完整周期。
+        ct["cleanup_ms"] = perf.record(
+            "cleanup_ms",
+            (time.perf_counter() - cleanup_t0) * 1000,
+        )
+        ct["total_with_cleanup_ms"] = perf.record(
+            "total_with_cleanup_ms",
+            ct.get("total_ms", 0.0) + ct["cleanup_ms"],
+        )
+        perf.log_summary("对焦搜索")
 
 def run_calibrate(cfg) -> int:
     cancel = cfg.cancel_event
@@ -870,6 +969,8 @@ def run_calibrate(cfg) -> int:
         t_total = time.perf_counter()
         motion = cfg.motion_backend
         cam = None
+        # True=借用GUI常驻句柄（标定结束后保持打开），False=自开自关。
+        borrowed_camera = False
         try:
             if motion is None or not motion.is_connected():
                 raise RuntimeError(
@@ -877,11 +978,17 @@ def run_calibrate(cfg) -> int:
                     "请先在GUI中连接M60 + E4O4"
                 )
             motion.prepare_new_task()
-            cam = HikCamera(cfg.camera_index)
             evaluator = OpenCVSharpnessEvaluator()
 
             t0 = time.perf_counter()
-            cam.open()
+            if cfg.camera is not None:
+                # 常驻相机：只借用句柄，标定结束后保持打开。
+                cam = cfg.camera
+                borrowed_camera = True
+                cam.stop_grabbing()
+            else:
+                cam = HikCamera(cfg.camera_index)
+                cam.open()
             cam.set_exposure(cfg.coarse_exposure_us or cfg.exposure_us)  # decimation 共用曝光
             cam.set_gain(cfg.gain_db)
             set_coarse_frame(cam,
@@ -1015,7 +1122,9 @@ def run_calibrate(cfg) -> int:
         finally:
             if cam is not None:
                 try:
-                    cam.close()
+                    # 常驻相机由GUI CameraService持有，任务只借用，不关闭。
+                    if not borrowed_camera:
+                        cam.close()
 
                 except Exception as cleanup_error:
                     logger.warning(

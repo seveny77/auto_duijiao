@@ -88,11 +88,34 @@ class E4O4PreCompareConfig:
         return len(self.positions)
 
 
-class E4O4Api:
-    """MiniEcatLib.dll的E4O4只读底层封装。
+@dataclass
+class _ComparatorStateCache:
+    """会话内比较器状态缓存，增量配置路径的跳写依据。
 
-    本阶段故意不封装设置编码器位置、手动输出、比较器配置和
-    比较器使能函数，防止诊断脚本意外产生相机触发。
+    只有同一connect会话内、且上一次全量配置回读校验通过后才有效；
+    重连或任何异常都会整体失效，失效后fast路径自动回退全量路径。
+    armed_line/armed_pre分别记录两类比较器是否处于SetEnable(1)状态
+    （必须独立：任一类型的清理失败只应迫使该类型回退全量自愈，不能
+    被另一类型的disarm清掉共享标志而掩盖）；bound_line_mask/
+    bound_pre_mask记录触发输出当前绑定的线性/预设定比较器掩码
+    （BandingCompare的两个独立字段，0=未绑定）。
+    """
+
+    valid: bool = False
+    armed_line: bool = False
+    armed_pre: bool = False
+    bound_line_mask: int = 0
+    bound_pre_mask: int = 0
+    line_binding: Optional[tuple] = None
+    pre_binding: Optional[tuple] = None
+
+
+class E4O4Api:
+    """MiniEcatLib.dll的E4O4底层封装（含比较器配置与增量下发）。
+
+    全量路径configure_*带完整回读校验；fast路径依赖会话内状态缓存
+    跳过恒定量重写与回读，只下发逐段变化的位置表。两条路径返回值
+    与异常语义一致，fast在缓存失效时自动回退全量。
     """
 
     def __init__(self, dll_path: str):
@@ -101,6 +124,7 @@ class E4O4Api:
         self._dll_directory_handle = None
         self._connected = False
         self._slave_count = 0
+        self._cmp_cache = _ComparatorStateCache()
 
     @property
     def dll_path(self) -> Path:
@@ -180,6 +204,7 @@ class E4O4Api:
 
         self._connected = True
         self._slave_count = int(slave_count.value)
+        self._cmp_cache = _ComparatorStateCache()
         logger.info(
             "E4O4总线连接成功: slave_count=%d, option=%d",
             self._slave_count,
@@ -195,6 +220,7 @@ class E4O4Api:
         self._dll.Mb_CloseEcat()
         self._connected = False
         self._slave_count = 0
+        self._cmp_cache = _ComparatorStateCache()
         logger.info("E4O4总线已关闭")
 
     def get_connect_status(self, slave_no: int) -> int:
@@ -359,6 +385,9 @@ class E4O4Api:
             ctypes.c_uint(polarity),
         )
         self._check_result("Mb_E4O4TrigOut_BandingCompare", result)
+        # 触发口掩码已清零：缓存里的绑定掩码从此与硬件背离，必须
+        # 整体失效，否则中途调用本方法后fast路径会跳过重新绑定。
+        self._cmp_cache = _ComparatorStateCache()
 
         result = self._dll.Mb_E4O4TrigOut_SetOutMode(
             ctypes.c_int(slave_no),
@@ -476,7 +505,7 @@ class E4O4Api:
         )
         self._check_result("Mb_E4O4TrigOut_ResetCounter", result)
 
-    def configure_line_compare(
+    def _validate_line_compare_arguments(
         self,
         slave_no: int,
         encoder_no: int,
@@ -485,9 +514,9 @@ class E4O4Api:
         start_position: int,
         end_position: int,
         interval: int,
-        polarity: int = 0,
-    ) -> E4O4LineCompareConfig:
-        """配置并回读线性比较器，但保持比较器关闭。"""
+        polarity: int,
+    ) -> int:
+        """校验线性比较器参数并返回预计触发数量。"""
 
         self._require_channel(slave_no, encoder_no, "编码器")
         self._require_channel(slave_no, line_compare_no, "线性比较器")
@@ -505,7 +534,31 @@ class E4O4Api:
                 "线性比较区间必须是步距的整数倍: "
                 f"distance={distance}, interval={interval}"
             )
-        expected_count = distance // interval + 1
+        return distance // interval + 1
+
+    def configure_line_compare(
+        self,
+        slave_no: int,
+        encoder_no: int,
+        line_compare_no: int,
+        trigger_no: int,
+        start_position: int,
+        end_position: int,
+        interval: int,
+        polarity: int = 0,
+    ) -> E4O4LineCompareConfig:
+        """配置并回读线性比较器，但保持比较器关闭。"""
+
+        expected_count = self._validate_line_compare_arguments(
+            slave_no,
+            encoder_no,
+            line_compare_no,
+            trigger_no,
+            start_position,
+            end_position,
+            interval,
+            polarity,
+        )
 
         self.disarm_line_compare(
             slave_no=slave_no,
@@ -586,6 +639,18 @@ class E4O4Api:
                 f"expected={expected}, actual={actual}"
             )
 
+        cache = self._cmp_cache
+        cache.valid = True
+        cache.armed_line = False
+        cache.bound_line_mask = line_mask
+        cache.bound_pre_mask = 0
+        cache.line_binding = (
+            slave_no,
+            encoder_no,
+            line_compare_no,
+            trigger_no,
+            polarity,
+        )
         return E4O4LineCompareConfig(
             encoder_no=encoder_no,
             line_compare_no=line_compare_no,
@@ -595,6 +660,156 @@ class E4O4Api:
             interval=interval,
             expected_trigger_count=expected_count,
         )
+
+    def configure_line_compare_fast(
+        self,
+        slave_no: int,
+        encoder_no: int,
+        line_compare_no: int,
+        trigger_no: int,
+        start_position: int,
+        end_position: int,
+        interval: int,
+        polarity: int = 0,
+    ) -> E4O4LineCompareConfig:
+        """增量配置线性比较器：只下发会话内变化量，其余复用缓存。
+
+        与全量路径的差异（对焦CT拆解报告·发现二的增量下发）：
+        - 跳过前置disarm：上一段清理已SetEnable(0)，仅缓存armed=False
+          且绑定相符时才走快路径；
+        - 跳过编码器重绑定与绑定回读：会话内绑定不变；
+        - 跳过get_trigger_config五元组回读：触发口静态参数已在会话
+          首次全量配置时校验，此后无人改写；
+        - 保留位置表下发SetTriggerData、计数清零ResetCounter与一次
+          GetTriggerData轻量回读——位置表是逐段计算的变化量，必须
+          每次下发并核对。
+
+        缓存失效（重连/异常/比较器仍使能/绑定不符）时自动回退全量
+        路径，调用方无感；段末触发数精确校验仍是最终安全网。
+        """
+
+        expected_count = self._validate_line_compare_arguments(
+            slave_no,
+            encoder_no,
+            line_compare_no,
+            trigger_no,
+            start_position,
+            end_position,
+            interval,
+            polarity,
+        )
+        line_mask = 1 << line_compare_no
+        cache = self._cmp_cache
+        if (
+            not cache.valid
+            or cache.armed_line
+            or cache.line_binding
+            != (
+                slave_no,
+                encoder_no,
+                line_compare_no,
+                trigger_no,
+                polarity,
+            )
+        ):
+            return self.configure_line_compare(
+                slave_no=slave_no,
+                encoder_no=encoder_no,
+                line_compare_no=line_compare_no,
+                trigger_no=trigger_no,
+                start_position=start_position,
+                end_position=end_position,
+                interval=interval,
+                polarity=polarity,
+            )
+
+        try:
+            if (
+                cache.bound_line_mask != line_mask
+                or cache.bound_pre_mask != 0
+            ):
+                result = self._dll.Mb_E4O4TrigOut_BandingCompare(
+                    ctypes.c_int(slave_no),
+                    ctypes.c_int(trigger_no),
+                    ctypes.c_uint(line_mask),
+                    ctypes.c_uint(0),
+                    ctypes.c_uint(polarity),
+                )
+                self._check_result(
+                    "Mb_E4O4TrigOut_BandingCompare", result
+                )
+                cache.bound_line_mask = line_mask
+                cache.bound_pre_mask = 0
+
+            result = self._dll.Mb_E4O4LineCmp_SetTriggerData(
+                ctypes.c_int(slave_no),
+                ctypes.c_int(line_compare_no),
+                ctypes.c_int(start_position),
+                ctypes.c_int(end_position),
+                ctypes.c_int(interval),
+            )
+            self._check_result(
+                "Mb_E4O4LineCmp_SetTriggerData", result
+            )
+            self.reset_trigger_count(slave_no, trigger_no)
+
+            actual_start = ctypes.c_int()
+            actual_end = ctypes.c_int()
+            actual_interval = ctypes.c_int()
+            result = self._dll.Mb_E4O4LineCmp_GetTriggerData(
+                ctypes.c_int(slave_no),
+                ctypes.c_int(line_compare_no),
+                ctypes.byref(actual_start),
+                ctypes.byref(actual_end),
+                ctypes.byref(actual_interval),
+            )
+            self._check_result(
+                "Mb_E4O4LineCmp_GetTriggerData", result
+            )
+            if (
+                actual_start.value != start_position
+                or actual_end.value != end_position
+                or actual_interval.value != interval
+            ):
+                raise LctStateError(
+                    "E4O4线性比较器增量下发回读不一致: "
+                    f"expected=({start_position}, {end_position}, "
+                    f"{interval}), "
+                    f"actual=({actual_start.value}, "
+                    f"{actual_end.value}, {actual_interval.value})"
+                )
+            logger.info(
+                "E4O4线性比较器增量配置完成: comparator=%d, "
+                "触发区间=%d..%d, 步距=%d",
+                line_compare_no,
+                start_position,
+                end_position,
+                interval,
+            )
+            return E4O4LineCompareConfig(
+                encoder_no=encoder_no,
+                line_compare_no=line_compare_no,
+                trigger_no=trigger_no,
+                start_position=start_position,
+                end_position=end_position,
+                interval=interval,
+                expected_trigger_count=expected_count,
+            )
+        except Exception as error:
+            self._cmp_cache.valid = False
+            logger.warning(
+                "E4O4线性比较器增量配置失败，回退全量路径: %s", error
+            )
+            return self.configure_line_compare(
+                slave_no=slave_no,
+                encoder_no=encoder_no,
+                line_compare_no=line_compare_no,
+                trigger_no=trigger_no,
+                start_position=start_position,
+                end_position=end_position,
+                interval=interval,
+                polarity=polarity,
+            )
 
     def arm_line_compare(self, slave_no: int, line_compare_no: int) -> None:
         """使能指定线性比较器。"""
@@ -606,6 +821,7 @@ class E4O4Api:
             ctypes.c_int(1),
         )
         self._check_result("Mb_E4O4LineCmp_SetEnable", result)
+        self._cmp_cache.armed_line = True
         logger.info(
             "E4O4线性比较器已使能: slave=%d, comparator=%d",
             slave_no,
@@ -637,11 +853,65 @@ class E4O4Api:
             ctypes.c_uint(polarity),
         )
         self._check_result("Mb_E4O4TrigOut_BandingCompare", result)
+        self._cmp_cache.armed_line = False
+        self._cmp_cache.bound_line_mask = 0
+        self._cmp_cache.bound_pre_mask = 0
         logger.info(
             "E4O4线性比较器已关闭并解绑: slave=%d, comparator=%d",
             slave_no,
             line_compare_no,
         )
+
+    def disarm_line_compare_keep_binding(
+        self,
+        slave_no: int,
+        line_compare_no: int,
+    ) -> None:
+        """仅关断线性比较器，保留编码器与触发口绑定。
+
+        增量路径的段间清理：与disarm_line_compare相比少一次
+        BandingCompare解绑往返。比较器已SetEnable(0)，保留绑定
+        不产生触发；下一段配置会按缓存掩码决定是否改绑。
+        """
+
+        self._require_channel(slave_no, line_compare_no, "线性比较器")
+        result = self._dll.Mb_E4O4LineCmp_SetEnable(
+            ctypes.c_int(slave_no),
+            ctypes.c_int(line_compare_no),
+            ctypes.c_int(0),
+        )
+        self._check_result("Mb_E4O4LineCmp_SetEnable", result)
+        self._cmp_cache.armed_line = False
+        logger.info(
+            "E4O4线性比较器已关断（保留绑定）: slave=%d, comparator=%d",
+            slave_no,
+            line_compare_no,
+        )
+
+    def _validate_pre_compare_arguments(
+        self,
+        slave_no: int,
+        encoder_no: int,
+        precompare_no: int,
+        trigger_no: int,
+        positions: list[int] | tuple[int, ...],
+        direction: int,
+        polarity: int,
+    ) -> tuple[int, ...]:
+        """校验预设定比较器参数并返回规范化的位置元组。"""
+
+        self._require_channel(slave_no, encoder_no, "编码器")
+        self._require_channel(slave_no, precompare_no, "预设定比较器")
+        self._require_channel(slave_no, trigger_no, "触发输出")
+        if not positions:
+            raise ValueError("预设定比较器至少需要一个触发位置")
+        if direction not in (0, 1, 2):
+            raise ValueError(
+                f"预设定比较方向只能是0、1或2: {direction}"
+            )
+        if polarity not in (0, 1):
+            raise ValueError(f"E4O4触发极性只能是0或1: {polarity}")
+        return tuple(int(value) for value in positions)
 
     def configure_pre_compare(
         self,
@@ -655,19 +925,15 @@ class E4O4Api:
     ) -> E4O4PreCompareConfig:
         """配置并回读预设定比较器，但保持比较器关闭。"""
 
-        self._require_channel(slave_no, encoder_no, "编码器")
-        self._require_channel(slave_no, precompare_no, "预设定比较器")
-        self._require_channel(slave_no, trigger_no, "触发输出")
-        if not positions:
-            raise ValueError("预设定比较器至少需要一个触发位置")
-        if direction not in (0, 1, 2):
-            raise ValueError(
-                f"预设定比较方向只能是0、1或2: {direction}"
-            )
-        if polarity not in (0, 1):
-            raise ValueError(f"E4O4触发极性只能是0或1: {polarity}")
-
-        normalized_positions = tuple(int(value) for value in positions)
+        normalized_positions = self._validate_pre_compare_arguments(
+            slave_no,
+            encoder_no,
+            precompare_no,
+            trigger_no,
+            positions,
+            direction,
+            polarity,
+        )
         self.disarm_pre_compare(
             slave_no=slave_no,
             precompare_no=precompare_no,
@@ -762,6 +1028,19 @@ class E4O4Api:
                 f"trigger={trigger_config}"
             )
 
+        cache = self._cmp_cache
+        cache.valid = True
+        cache.armed_pre = False
+        cache.bound_line_mask = 0
+        cache.bound_pre_mask = pre_mask
+        cache.pre_binding = (
+            slave_no,
+            encoder_no,
+            precompare_no,
+            trigger_no,
+            direction,
+            polarity,
+        )
         return E4O4PreCompareConfig(
             encoder_no=encoder_no,
             precompare_no=precompare_no,
@@ -769,6 +1048,160 @@ class E4O4Api:
             direction=direction,
             positions=normalized_positions,
         )
+
+    def configure_pre_compare_fast(
+        self,
+        slave_no: int,
+        encoder_no: int,
+        precompare_no: int,
+        trigger_no: int,
+        positions: list[int] | tuple[int, ...],
+        direction: int,
+        polarity: int = 0,
+    ) -> E4O4PreCompareConfig:
+        """增量配置预设定比较器：语义同configure_line_compare_fast。
+
+        额外保留ResetTrigData（PreCmp点位表疑为追加式，改点前必须
+        清空）与点位表轻量回读（数量+内容各一次）；编码器绑定与
+        触发方向在会话内不变，缓存命中时跳过。
+        """
+
+        normalized_positions = self._validate_pre_compare_arguments(
+            slave_no,
+            encoder_no,
+            precompare_no,
+            trigger_no,
+            positions,
+            direction,
+            polarity,
+        )
+        pre_mask = 1 << precompare_no
+        cache = self._cmp_cache
+        if (
+            not cache.valid
+            or cache.armed_pre
+            or cache.pre_binding
+            != (
+                slave_no,
+                encoder_no,
+                precompare_no,
+                trigger_no,
+                direction,
+                polarity,
+            )
+        ):
+            return self.configure_pre_compare(
+                slave_no=slave_no,
+                encoder_no=encoder_no,
+                precompare_no=precompare_no,
+                trigger_no=trigger_no,
+                positions=list(normalized_positions),
+                direction=direction,
+                polarity=polarity,
+            )
+
+        try:
+            result = self._dll.Mb_E4O4PreCmp_ResetTrigData(
+                ctypes.c_int(slave_no),
+                ctypes.c_int(precompare_no),
+            )
+            self._check_result(
+                "Mb_E4O4PreCmp_ResetTrigData", result
+            )
+
+            position_array = (ctypes.c_int * len(normalized_positions))(
+                *normalized_positions
+            )
+            result = self._dll.Mb_E4O4PreCmp_SetTrigData(
+                ctypes.c_int(slave_no),
+                ctypes.c_int(precompare_no),
+                position_array,
+                ctypes.c_int(len(normalized_positions)),
+            )
+            self._check_result(
+                "Mb_E4O4PreCmp_SetTrigData", result
+            )
+
+            if (
+                cache.bound_line_mask != 0
+                or cache.bound_pre_mask != pre_mask
+            ):
+                result = self._dll.Mb_E4O4TrigOut_BandingCompare(
+                    ctypes.c_int(slave_no),
+                    ctypes.c_int(trigger_no),
+                    ctypes.c_uint(0),
+                    ctypes.c_uint(pre_mask),
+                    ctypes.c_uint(polarity),
+                )
+                self._check_result(
+                    "Mb_E4O4TrigOut_BandingCompare", result
+                )
+                cache.bound_line_mask = 0
+                cache.bound_pre_mask = pre_mask
+            self.reset_trigger_count(slave_no, trigger_no)
+
+            actual_count = ctypes.c_int()
+            result = self._dll.Mb_E4O4PreCmp_GetTrigDataCnt(
+                ctypes.c_int(slave_no),
+                ctypes.c_int(precompare_no),
+                ctypes.byref(actual_count),
+            )
+            self._check_result(
+                "Mb_E4O4PreCmp_GetTrigDataCnt", result
+            )
+            if actual_count.value != len(normalized_positions):
+                raise LctStateError(
+                    "E4O4预设定比较器增量点数回读不一致: "
+                    f"expected={len(normalized_positions)}, "
+                    f"actual={actual_count.value}"
+                )
+
+            actual_array = (ctypes.c_int * len(normalized_positions))()
+            result = self._dll.Mb_E4O4PreCmp_GetTrigData(
+                ctypes.c_int(slave_no),
+                ctypes.c_int(precompare_no),
+                actual_array,
+            )
+            self._check_result(
+                "Mb_E4O4PreCmp_GetTrigData", result
+            )
+            actual_positions = tuple(
+                int(value) for value in actual_array
+            )
+            if actual_positions != normalized_positions:
+                raise LctStateError(
+                    "E4O4预设定比较器增量下发回读不一致: "
+                    f"expected={normalized_positions}, "
+                    f"actual={actual_positions}"
+                )
+            logger.info(
+                "E4O4预设定比较器增量配置完成: comparator=%d, "
+                "方向=%d, 点位数=%d",
+                precompare_no,
+                direction,
+                len(normalized_positions),
+            )
+            return E4O4PreCompareConfig(
+                encoder_no=encoder_no,
+                precompare_no=precompare_no,
+                trigger_no=trigger_no,
+                direction=direction,
+                positions=normalized_positions,
+            )
+        except Exception as error:
+            self._cmp_cache.valid = False
+            logger.warning(
+                "E4O4预设定比较器增量配置失败，回退全量路径: %s", error
+            )
+            return self.configure_pre_compare(
+                slave_no=slave_no,
+                encoder_no=encoder_no,
+                precompare_no=precompare_no,
+                trigger_no=trigger_no,
+                positions=list(normalized_positions),
+                direction=direction,
+                polarity=polarity,
+            )
 
     def arm_pre_compare(self, slave_no: int, precompare_no: int) -> None:
         """使能指定预设定比较器。"""
@@ -780,6 +1213,7 @@ class E4O4Api:
             ctypes.c_int(1),
         )
         self._check_result("Mb_E4O4PreCmp_SetEnable", result)
+        self._cmp_cache.armed_pre = True
         logger.info(
             "E4O4预设定比较器已使能: slave=%d, comparator=%d",
             slave_no,
@@ -811,10 +1245,51 @@ class E4O4Api:
             ctypes.c_uint(polarity),
         )
         self._check_result("Mb_E4O4TrigOut_BandingCompare", result)
+        self._cmp_cache.armed_pre = False
+        self._cmp_cache.bound_line_mask = 0
+        self._cmp_cache.bound_pre_mask = 0
         logger.info(
             "E4O4预设定比较器已关闭并解绑: slave=%d, comparator=%d",
             slave_no,
             precompare_no,
+        )
+
+    def disarm_pre_compare_keep_binding(
+        self,
+        slave_no: int,
+        precompare_no: int,
+    ) -> None:
+        """仅关断预设定比较器，保留编码器与触发口绑定。
+
+        语义同disarm_line_compare_keep_binding，供增量路径段间清理。
+        """
+
+        self._require_channel(slave_no, precompare_no, "预设定比较器")
+        result = self._dll.Mb_E4O4PreCmp_SetEnable(
+            ctypes.c_int(slave_no),
+            ctypes.c_int(precompare_no),
+            ctypes.c_int(0),
+        )
+        self._check_result("Mb_E4O4PreCmp_SetEnable", result)
+        self._cmp_cache.armed_pre = False
+        logger.info(
+            "E4O4预设定比较器已关断（保留绑定）: slave=%d, comparator=%d",
+            slave_no,
+            precompare_no,
+        )
+
+    def invalidate_comparator_cache(self) -> None:
+        """整体失效比较器状态缓存，下一段配置强制回退全量路径。
+
+        供backend在「缓存可能与硬件真实状态发散」的场景调用：触发数
+        校验失败、清理DLL调用失败被吞、外部工具改写E4O4等。失效后
+        fast路径的门禁不再命中，全量路径会重做绑定/掩码/回读校验，
+        天然重建正确状态。
+        """
+
+        self._cmp_cache = _ComparatorStateCache()
+        logger.warning(
+            "E4O4比较器状态缓存已失效，下一段配置将走全量路径"
         )
 
     def _bind_functions(self) -> None:
@@ -1074,3 +1549,11 @@ class E4O4Api:
                 operation=operation,
                 error_code=code,
             )
+
+
+# ── CT 类级插桩 ──
+# E4O4 每个 DLL 往返方法（configure_line_compare/get_trigger_count/
+# get_encoder_position 等）计时入 perf 注册表，单次 ≥100ms 打 [CT][慢]。
+import perf as _perf
+
+_perf.instrument_class(E4O4Api, "hw.e4o4", slow_ms=100.0)

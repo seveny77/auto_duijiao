@@ -49,6 +49,10 @@ class LctMotionConfig:
     trigger_pulse_width_10ns: int = 2000
     trigger_polarity: int = 0
 
+    # E4O4比较器增量下发：段间跳过恒定量重写与回读，只下发
+    # 逐段变化的位置表（会话首段仍走全量配置校验）。
+    e4o4_incremental_config: bool = False
+
     positioning_velocity_um_s: float = 100.0
     scan_velocity_um_s: float = 100.0
 
@@ -59,6 +63,10 @@ class LctMotionConfig:
     line_scan_overrun_um: float = 20.0
     single_capture_approach_um: int = 50
     single_capture_exit_um: int = 50
+    # 单点飞拍越过方向：0=正向（从目标下方准备位上越），
+    # 1=反向（从目标上方直接下越，PreCmp dir=1 台架已证）。
+    # 反向时精扫末端已在目标上方，通常可跳过准备定位直接起扫。
+    single_capture_direction: int = 0
     position_tolerance_um: float = 1.0
 
     home_method: int = 33
@@ -133,6 +141,12 @@ class LctMotionConfig:
                 f"{self.trigger_polarity}"
             )
 
+        if not isinstance(self.e4o4_incremental_config, bool):
+            raise LctConfigurationError(
+                "E4O4增量下发开关只能是布尔值: "
+                f"{self.e4o4_incremental_config}"
+            )
+
         if self.positioning_velocity_um_s <= 0:
             raise LctConfigurationError(
                 "定位速度必须大于0: "
@@ -174,6 +188,11 @@ class LctMotionConfig:
             raise LctConfigurationError(
                 "单点飞拍越过距离必须大于0: "
                 f"{self.single_capture_exit_um}"
+            )
+        if self.single_capture_direction not in (0, 1):
+            raise LctConfigurationError(
+                "单点飞拍方向只能是0(正向)或1(反向): "
+                f"{self.single_capture_direction}"
             )
         if self.position_tolerance_um <= 0:
             raise LctConfigurationError(

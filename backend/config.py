@@ -71,6 +71,10 @@ class FocusConfig:
     # 运行期注入：GUI的MotionService持有已连接的运动后端。
     # Pipeline只借用它执行本轮任务，不负责连接或断开。
     motion_backend: Optional[object] = None
+    # 运行期注入：GUI的CameraService持有的常驻相机句柄。
+    # Pipeline只借用它执行本轮任务，结束后保持打开（省每轮
+    # open的~500ms）；为None时Pipeline自行open/close（CLI路径）。
+    camera: Optional[object] = None
     # CLI 或无界面运行时保持 None，不产生任何预览开销。
     # image, phase, sequence, score
     preview_callback: Optional[PreviewCallback] = None
