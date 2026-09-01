@@ -6,11 +6,17 @@ import unittest
 import numpy as np
 
 from backend.inspection_config import InspectionConfig
-from backend.inspection_renderer import render_inspection_overlay
+from backend.inspection_renderer import (
+    render_image_inspection_overlay,
+    render_inspection_overlay,
+)
 from backend.inspection_types import (
     CircleCandidate,
+    CircleInspectionResult,
+    ImageInspectionResult,
     InspectionRegionRule,
     InspectionResult,
+    RoiRegion,
     SegmentationInstance,
 )
 
@@ -120,6 +126,72 @@ class InspectionRendererTest(unittest.TestCase):
 
         self.assertEqual(rendered.shape, (30, 30, 3))
         self.assertTrue(np.all(rendered == 50))
+
+    def test_multi_circle_overlay_draws_all_rois_circles_and_contours(self):
+        image = np.zeros((100, 200, 3), dtype=np.uint8)
+        result = ImageInspectionResult(circle_results=[
+            CircleInspectionResult(
+                circle_id="circle-001",
+                circle_candidate=CircleCandidate(
+                    center_x=40,
+                    center_y=50,
+                    radius_px=15,
+                ),
+                roi=RoiRegion(x=20, y=30, width=40, height=40),
+                instances=[SegmentationInstance(
+                    class_id=0,
+                    polygon=[(25, 35), (55, 35), (55, 65), (25, 65)],
+                )],
+            ),
+            CircleInspectionResult(
+                circle_id="circle-002",
+                circle_candidate=CircleCandidate(
+                    center_x=140,
+                    center_y=50,
+                    radius_px=15,
+                ),
+                roi=RoiRegion(x=120, y=30, width=40, height=40),
+                instances=[SegmentationInstance(
+                    class_id=1,
+                    polygon=[
+                        (125, 35), (155, 35), (155, 65), (125, 65)
+                    ],
+                )],
+            ),
+        ])
+
+        rendered = render_image_inspection_overlay(
+            image,
+            result,
+            InspectionConfig(),
+            show_rings=False,
+        )
+
+        for pixel in (rendered[35, 40], rendered[35, 140]):
+            self.assertGreater(int(pixel[2]), int(pixel[0]) + 100)
+            self.assertGreater(int(pixel[2]), int(pixel[1]) + 100)
+        self.assertTrue(np.any(rendered[30, 30] != 0))
+        self.assertTrue(np.any(rendered[30, 130] != 0))
+        self.assertTrue(np.any(rendered[50, 40] != 0))
+        self.assertTrue(np.any(rendered[50, 140] != 0))
+        self.assertTrue(np.array_equal(rendered[50, 50], image[50, 50]))
+        self.assertTrue(np.array_equal(rendered[50, 150], image[50, 150]))
+        self.assertTrue(np.array_equal(image, np.zeros_like(image)))
+
+    def test_multi_circle_overlay_ignores_placeholder_results(self):
+        image = np.full((40, 40), 60, dtype=np.uint8)
+        result = ImageInspectionResult(circle_results=[
+            CircleInspectionResult(circle_id="circle-001")
+        ])
+
+        rendered = render_image_inspection_overlay(
+            image,
+            result,
+            InspectionConfig(),
+        )
+
+        self.assertEqual(rendered.shape, (40, 40, 3))
+        self.assertTrue(np.all(rendered == 60))
 
 
 if __name__ == "__main__":

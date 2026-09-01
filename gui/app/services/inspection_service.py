@@ -30,9 +30,12 @@ class InspectionService(QObject):
     model_load_failed = pyqtSignal(str)
     image_pending = pyqtSignal(str)
     inspection_started = pyqtSignal(str)
+    image_inspection_finished = pyqtSignal(str, object)
+    image_inspection_visual_ready = pyqtSignal(str, object, object, object)
     inspection_finished = pyqtSignal(str, object)
     inspection_visual_ready = pyqtSignal(str, object, object, object)
     circle_redetection_started = pyqtSignal(str)
+    image_circle_redetection_finished = pyqtSignal(str, object)
     circle_redetection_finished = pyqtSignal(str, object)
     shutdown_ready = pyqtSignal()
 
@@ -95,8 +98,16 @@ class InspectionService(QObject):
             self._on_model_load_failed,
             Qt.QueuedConnection,
         )
+        self._worker.image_inspection_finished.connect(
+            self._on_image_inspection_finished,
+            Qt.QueuedConnection,
+        )
         self._worker.inspection_finished.connect(
             self._on_inspection_finished,
+            Qt.QueuedConnection,
+        )
+        self._worker.image_circle_redetection_finished.connect(
+            self._on_image_circle_redetection_finished,
             Qt.QueuedConnection,
         )
         self._worker.circle_redetection_finished.connect(
@@ -193,7 +204,7 @@ class InspectionService(QObject):
         source_result: InspectionResult,
         config,
     ) -> bool:
-        """后台重跑当前图 Hough；不调用分割模型。"""
+        """后台重跑当前图 Hough，并按新圆心重新裁切 ROI 和推理。"""
 
         if self._shutting_down or self._state != InspectionState.READY:
             return False
@@ -311,6 +322,24 @@ class InspectionService(QObject):
         else:
             self._set_state(InspectionState.READY)
 
+    def _on_image_inspection_finished(self, task_id: str, result):
+        """在旧 GUI 兼容结果之前转发完整多圆结果。"""
+
+        if self.sender() is not self._worker:
+            return
+        if (
+            self._active_operation != "inspection"
+            or task_id != self._active_task_id
+        ):
+            return
+        self.image_inspection_finished.emit(task_id, result)
+        self.image_inspection_visual_ready.emit(
+            task_id,
+            self._active_image,
+            result,
+            self._active_config,
+        )
+
     def _on_circle_redetection_finished(self, task_id: str, result):
         if self.sender() is not self._worker:
             return
@@ -329,6 +358,18 @@ class InspectionService(QObject):
             self._start_task(self._pending_task)
         else:
             self._set_state(InspectionState.READY)
+
+    def _on_image_circle_redetection_finished(self, task_id: str, result):
+        """转发重新找圆后重新推理得到的完整多圆结果。"""
+
+        if self.sender() is not self._worker:
+            return
+        if (
+            self._active_operation != "circle_redetection"
+            or task_id != self._active_task_id
+        ):
+            return
+        self.image_circle_redetection_finished.emit(task_id, result)
 
     def _clear_active_operation(self):
         self._active_operation = None

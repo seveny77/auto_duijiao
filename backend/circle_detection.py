@@ -9,7 +9,7 @@ from backend.inspection_types import CircleCandidate
 
 
 class HoughCircleDetector:
-    """在降采样图上检测候选圆，并选择圆周支持度最高者。"""
+    """在降采样图上检测、去重并选择配置数量的产品圆。"""
 
     def detect(
         self,
@@ -21,7 +21,7 @@ class HoughCircleDetector:
         bool,
         list[str],
     ]:
-        """返回候选、选中序号、自动确认状态和警告列表。"""
+        """返回按位置排列的选中圆、最高分序号、整体确认状态和警告。"""
 
         validation_errors = _validate_detection_config(config)
         if validation_errors:
@@ -107,26 +107,76 @@ class HoughCircleDetector:
             ))
 
         candidates.sort(key=lambda item: item.score, reverse=True)
+        raw_candidate_count = len(candidates)
+        candidates = _deduplicate_candidates(
+            candidates,
+            min_center_distance_px=config.min_center_distance_px,
+        )
         detected_count = len(candidates)
         if detected_count == 0:
             return [], None, False, ["Hough 圆检测未产生有效候选圆"]
 
+        if raw_candidate_count != detected_count:
+            warnings.append(
+                f"Hough 原始候选 {raw_candidate_count} 个，"
+                f"按圆心距离去重后 {detected_count} 个"
+            )
+
         if detected_count != config.expected_circle_count:
             warnings.append(
                 f"预期检测到 {config.expected_circle_count} 个圆，"
-                f"Hough 实际检测到 {detected_count} 个"
+                f"Hough 去重后检测到 {detected_count} 个"
             )
 
-        candidates = candidates[:config.expected_circle_count]
-        selected_index = 0
-        confirmed = candidates[0].score >= config.min_candidate_score
-        if not confirmed:
+        selected_candidates = candidates[:config.expected_circle_count]
+        highest_score_candidate = selected_candidates[0]
+        # 进入多 ROI 流程后使用这个位置顺序生成稳定的 circle-001 等编号；
+        # selected_index 仍指向评分最高的圆，保持当前单圆 GUI/规则引擎兼容。
+        selected_candidates.sort(
+            key=lambda item: (item.center_x, item.center_y, item.radius_px)
+        )
+        selected_index = next(
+            index
+            for index, candidate in enumerate(selected_candidates)
+            if candidate is highest_score_candidate
+        )
+
+        complete_count = len(selected_candidates) == config.expected_circle_count
+        low_score_candidates = [
+            candidate
+            for candidate in selected_candidates
+            if candidate.score < config.min_candidate_score
+        ]
+        confirmed = complete_count and not low_score_candidates
+        for candidate in low_score_candidates:
             warnings.append(
-                f"最高候选评分 {candidates[0].score:.3f} 低于自动确认阈值"
+                f"候选圆中心({candidate.center_x:.1f}, {candidate.center_y:.1f})"
+                f"评分 {candidate.score:.3f} 低于自动确认阈值"
                 f" {config.min_candidate_score:.3f}"
             )
 
-        return candidates, selected_index, confirmed, warnings
+        return selected_candidates, selected_index, confirmed, warnings
+
+
+def _deduplicate_candidates(
+    candidates: list[CircleCandidate],
+    *,
+    min_center_distance_px: float,
+) -> list[CircleCandidate]:
+    """保留高分候选；圆心距离小于配置阈值的候选视为同一端面。"""
+
+    kept = []
+    for candidate in candidates:
+        duplicate = any(
+            math.hypot(
+                candidate.center_x - existing.center_x,
+                candidate.center_y - existing.center_y,
+            ) < min_center_distance_px
+            for existing in kept
+        )
+        if not duplicate:
+            kept.append(candidate)
+    return kept
 
 
 def _validate_detection_config(config: CircleDetectionConfig) -> list[str]:

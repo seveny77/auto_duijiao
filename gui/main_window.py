@@ -131,6 +131,7 @@ class MainWindow(QMainWindow):
         self.inspection_panel.set_inspection_config(self.inspection_config)
         self._inspection_current_task_id = ""
         self._inspection_current_image = None
+        self._inspection_image_result = None
         self._inspection_source_result = None
         self._inspection_circle_request_config = None
         self._inspection_close_requested = False
@@ -227,8 +228,14 @@ class MainWindow(QMainWindow):
         self.inspection_service.inspection_finished.connect(
             self._on_inspection_finished
         )
+        self.inspection_service.image_inspection_visual_ready.connect(
+            self._on_image_inspection_visual_ready
+        )
         self.inspection_service.inspection_visual_ready.connect(
             self._on_inspection_visual_ready
+        )
+        self.inspection_service.image_circle_redetection_finished.connect(
+            self._on_image_circle_redetection_finished
         )
         self.inspection_service.circle_redetection_finished.connect(
             self._on_circle_redetection_finished
@@ -371,8 +378,15 @@ class MainWindow(QMainWindow):
 
         status = getattr(getattr(result, "status", None), "value", "PENDING")
         verdict = {"PASS": "合格", "FAIL": "不合格", "ERROR": "检测错误"}.get(status, "待确认")
-        self.inspection_panel.verdict_label.setText(verdict)
-        self.inspection_panel.verdict_detail_label.setText(f"任务：{task_id}")
+        has_image_result = (
+            getattr(self._inspection_image_result, "image_id", "")
+            == task_id
+        )
+        if not has_image_result:
+            self.inspection_panel.verdict_label.setText(verdict)
+            self.inspection_panel.verdict_detail_label.setText(
+                f"任务：{task_id}"
+            )
         self._log(f"[检测] 任务 {task_id} 完成，结果: {verdict}")
 
         error = str(getattr(result, "error", "") or "").strip()
@@ -398,17 +412,43 @@ class MainWindow(QMainWindow):
             # 保留首次推理和找圆的原始输出。后续参数复判始终复用它，
             # 不把某次复判结果当作下一次的模型输入。
             self._inspection_source_result = result
-            self.inspection_panel.present_inspection_result(
-                task_id,
-                original_image,
-                result,
-                config,
-            )
+            if (
+                getattr(self._inspection_image_result, "image_id", "")
+                != task_id
+            ):
+                self.inspection_panel.present_inspection_result(
+                    task_id,
+                    original_image,
+                    result,
+                    config,
+                )
         except (TypeError, ValueError) as error:
             self._log(f"[检测] 结果绘制失败: {error}")
 
+    def _on_image_inspection_visual_ready(
+        self,
+        task_id: str,
+        original_image,
+        result,
+        _config,
+    ):
+        """保留完整多圆结果，当前单圆界面仍使用兼容结果绘制。"""
+
+        self._inspection_current_task_id = task_id
+        self._inspection_current_image = original_image
+        self._inspection_image_result = result
+        try:
+            self.inspection_panel.present_image_inspection_result(
+                task_id,
+                original_image,
+                result,
+                _config,
+            )
+        except (TypeError, ValueError) as error:
+            self._log(f"[检测] 多端面结果绘制失败: {error}")
+
     def _on_circle_redetection_request(self, config: InspectionConfig):
-        """将当前图提交给检测线程，只重新执行 Hough 和规则统计。"""
+        """将当前图提交给检测线程，重新找圆并按新 ROI 重跑分割。"""
 
         if (
             self._inspection_current_image is None
@@ -433,10 +473,10 @@ class MainWindow(QMainWindow):
 
         self._inspection_circle_request_config = config
         self.inspection_panel.set_circle_redetecting()
-        self.status_message.emit("正在后台重新查找当前图圆心")
+        self.status_message.emit("正在后台重新找圆并检测新 ROI")
 
     def _on_circle_redetection_finished(self, task_id: str, result):
-        """接收仅 Hough 任务结果，并复用原分割实例刷新当前图。"""
+        """接收重新找圆和 ROI 重推理结果并刷新当前图。"""
 
         if task_id != self._inspection_current_task_id:
             return
@@ -445,24 +485,30 @@ class MainWindow(QMainWindow):
         if config is None:
             return
 
+        has_image_result = (
+            getattr(self._inspection_image_result, "image_id", "")
+            == task_id
+        )
+        self._inspection_source_result = result
         if getattr(getattr(result, "status", None), "value", "") == "ERROR":
             message = str(getattr(result, "error", "") or "重新找圆失败")
-            self.inspection_panel.set_circle_redetection_failed(message)
+            if not has_image_result:
+                self.inspection_panel.set_circle_redetection_failed(message)
             self._log(f"[检测] 重新找圆失败: {message}")
             self.status_message.emit("重新找圆失败")
             return
 
-        self._inspection_source_result = result
-        try:
-            self.inspection_panel.present_recalculated_result(
-                task_id,
-                result,
-                config,
-            )
-        except (TypeError, ValueError) as error:
-            self.inspection_panel.set_circle_redetection_failed(str(error))
-            self._log(f"[检测] 重新找圆结果绘制失败: {error}")
-            return
+        if not has_image_result:
+            try:
+                self.inspection_panel.present_recalculated_result(
+                    task_id,
+                    result,
+                    config,
+                )
+            except (TypeError, ValueError) as error:
+                self.inspection_panel.set_circle_redetection_failed(str(error))
+                self._log(f"[检测] 重新找圆结果绘制失败: {error}")
+                return
         for message in list(getattr(result, "warnings", []) or []):
             self._log(f"[检测] 找圆警告: {message}")
         for message in list(getattr(result, "failure_reasons", []) or []):
@@ -471,8 +517,42 @@ class MainWindow(QMainWindow):
         self._log(f"[检测] 当前图重新找圆完成，候选数: {circle_count}")
         self.status_message.emit("当前图重新找圆完成")
 
+    def _on_image_circle_redetection_finished(self, task_id: str, result):
+        """保留重新找圆和 ROI 重推理后的完整多圆结果。"""
+
+        if task_id == self._inspection_current_task_id:
+            self._inspection_image_result = result
+            config = (
+                self._inspection_circle_request_config
+                or self.inspection_config
+            )
+            try:
+                self.inspection_panel.present_image_recalculated_result(
+                    task_id,
+                    result,
+                    config,
+                )
+            except (TypeError, ValueError) as error:
+                self._log(f"[检测] 多端面重新找圆结果绘制失败: {error}")
+
     def _on_circle_confirmation_request(self, config: InspectionConfig):
         """确认最高评分候选圆并轻量复判，不重新运行 Hough。"""
+
+        detected_task_count = int(getattr(
+            self._inspection_image_result,
+            "expected_circle_count",
+            config.circle.expected_circle_count,
+        ))
+        if (
+            detected_task_count != 1
+            or config.circle.expected_circle_count != 1
+        ):
+            self._log(
+                "[检测] 当前多圆结果暂不支持在单圆界面人工确认；"
+                "请调整找圆参数后重新检测"
+            )
+            self.status_message.emit("多圆结果需在后续多圆界面逐个确认")
+            return
 
         source = self._inspection_source_result
         if source is None or not source.circle_candidates:
@@ -518,6 +598,21 @@ class MainWindow(QMainWindow):
 
     def _on_inspection_recalculate(self, config: InspectionConfig):
         """复用已有实例和圆候选，只重新执行规则统计与叠加绘制。"""
+
+        detected_task_count = int(getattr(
+            self._inspection_image_result,
+            "expected_circle_count",
+            config.circle.expected_circle_count,
+        ))
+        if (
+            detected_task_count != 1
+            or config.circle.expected_circle_count != 1
+        ):
+            self._log(
+                "[检测] 当前单圆兼容界面不执行多圆参数复判；"
+                "完整多圆复判将在多圆结果界面接入"
+            )
+            return
 
         source = self._inspection_source_result
         if source is None or not self._inspection_current_task_id:

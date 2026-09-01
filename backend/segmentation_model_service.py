@@ -109,7 +109,7 @@ class SegmentationModelService:
         imgsz: int = 1280,
         confidence_floor: float = 0.01,
     ) -> list[SegmentationInstance]:
-        """对一张最终图推理并返回普通 Python 分割实例。"""
+        """对单张图像或 ROI 推理并返回普通 Python 分割实例。"""
 
         if self._model is None:
             raise RuntimeError("分割模型尚未加载")

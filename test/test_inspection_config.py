@@ -127,6 +127,7 @@ class InspectionConfigTest(unittest.TestCase):
             history_root="inspection_history",
             circle=CircleDetectionConfig(min_candidate_score=0.9),
             region_rules=_valid_rules(),
+            roi_size_px=1536,
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -138,6 +139,7 @@ class InspectionConfigTest(unittest.TestCase):
             self.assertEqual(restored, config)
             payload = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(payload["region_rules"][0]["region_name"], "中心区")
+            self.assertEqual(payload["roi_size_px"], 1536)
             self.assertFalse(Path(f"{path}.tmp").exists())
 
     def test_missing_file_returns_default_config(self):
@@ -146,6 +148,7 @@ class InspectionConfigTest(unittest.TestCase):
             restored = InspectionConfigStore(str(path)).load()
 
         self.assertEqual(restored, InspectionConfig())
+        self.assertEqual(restored.roi_size_px, 1024)
 
     def test_old_config_missing_fields_uses_defaults(self):
         restored = inspection_config_from_dict({
@@ -158,8 +161,76 @@ class InspectionConfigTest(unittest.TestCase):
         self.assertEqual(restored.circle, CircleDetectionConfig())
         self.assertEqual(restored.region_rules, [])
         self.assertEqual(restored.history_root, "inspection_history")
-        self.assertEqual(restored.inference_imgsz, 1280)
+        self.assertEqual(restored.inference_imgsz, 4096)
         self.assertEqual(restored.inference_confidence_floor, 0.01)
+        self.assertEqual(restored.roi_size_px, 1024)
+
+    def test_roi_size_is_independent_of_circle_radius_and_inference_size(self):
+        config = inspection_config_from_dict({
+            "mm_per_pixel": 0.24,
+            "roi_size_px": 701,
+            "inference_imgsz": 1920,
+            "circle": {"min_radius_px": 100, "max_radius_px": 2000},
+        })
+
+        self.assertEqual(config.validate(), [])
+        self.assertEqual(config.roi_size_px, 701)
+        self.assertEqual(config.inference_imgsz, 1920)
+        config.circle.max_radius_px = 3000
+        config.inference_imgsz = 4096
+        self.assertEqual(config.roi_size_px, 701)
+
+    def test_invalid_roi_sizes_are_rejected_without_silent_coercion(self):
+        for value in (0, -1, 1024.5, 1024.0, True, False, "1024", None,
+                      [], {}, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                config = InspectionConfig(mm_per_pixel=0.24, roi_size_px=value)
+                self.assertTrue(any("roi_size_px" in error for error in config.validate()))
+                with self.assertRaisesRegex(ValueError, "roi_size_px"):
+                    inspection_config_from_dict({"roi_size_px": value})
+
+    def test_invalid_roi_save_preserves_existing_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "inspection_config.json"
+            store = InspectionConfigStore(str(path))
+            store.save(InspectionConfig(mm_per_pixel=0.24, roi_size_px=800))
+            original = path.read_bytes()
+
+            for value in (0, 12.5, True):
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(ValueError, "roi_size_px"):
+                        store.save(InspectionConfig(roi_size_px=value))
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertFalse(Path(f"{path}.tmp").exists())
+
+    def test_roi_validation_does_not_block_lightweight_rule_evaluation(self):
+        config = InspectionConfig(
+            mm_per_pixel=0.24, region_rules=_valid_rules(), roi_size_px=0,
+        )
+
+        self.assertTrue(any("roi_size_px" in error for error in config.validate()))
+        # 复判只使用已有实例；裁切宽度不属于其输入，也不会触发新推理。
+        self.assertEqual(config.validate_evaluation(), [])
+
+    def test_old_json_load_does_not_rewrite_runtime_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "inspection_config.json"
+            old_payload = {
+                "model_path": "models/best.pt",
+                "inference_imgsz": 4096,
+                "inference_confidence_floor": 0.1,
+                "mm_per_pixel": 0.24,
+            }
+            path.write_text(json.dumps(old_payload), encoding="utf-8")
+            original = path.read_bytes()
+            restored = InspectionConfigStore(str(path)).load()
+
+            self.assertEqual(restored.roi_size_px, 1024)
+            self.assertEqual(restored.model_path, "models/best.pt")
+            self.assertEqual(restored.inference_imgsz, 4096)
+            self.assertEqual(restored.inference_confidence_floor, 0.1)
+            self.assertEqual(restored.mm_per_pixel, 0.24)
+            self.assertEqual(path.read_bytes(), original)
 
     def test_old_total_area_limit_is_ignored(self):
         restored = inspection_config_from_dict({

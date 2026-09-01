@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Hough 圆检测与最高分候选选择测试。"""
+"""Hough 多圆检测、去重、选择和整体确认测试。"""
 
 import ast
 import unittest
@@ -71,7 +71,84 @@ class HoughCircleDetectorTest(unittest.TestCase):
         self.assertEqual(selected, 0)
         self.assertTrue(confirmed)
         self.assertAlmostEqual(candidates[0].center_x, 80.0)
-        self.assertTrue(any("实际检测到 2" in item for item in warnings))
+        self.assertTrue(any("去重后检测到 2" in item for item in warnings))
+
+    def test_expected_circles_are_position_sorted_but_best_remains_selected(self):
+        image = np.zeros((300, 400), dtype=np.uint8)
+        raw = np.array([[[300.0, 120.0, 40.0], [80.0, 120.0, 40.0]]])
+
+        with patch("cv2.HoughCircles", return_value=raw), patch(
+            "backend.circle_detection._circle_edge_support",
+            side_effect=[0.9, 0.4],
+        ):
+            candidates, selected, confirmed, warnings = self.detector.detect(
+                image,
+                self.config(
+                    min_radius_px=30,
+                    max_radius_px=50,
+                    expected_circle_count=2,
+                    min_candidate_score=0.3,
+                ),
+            )
+
+        self.assertEqual([item.center_x for item in candidates], [80.0, 300.0])
+        self.assertEqual(selected, 1)
+        self.assertEqual(candidates[selected].score, 0.9)
+        self.assertTrue(confirmed)
+        self.assertEqual(warnings, [])
+
+    def test_nearby_raw_candidates_are_deduplicated_with_high_score_kept(self):
+        image = np.zeros((300, 400), dtype=np.uint8)
+        raw = np.array([[[80.0, 100.0, 40.0],
+                         [90.0, 105.0, 42.0],
+                         [260.0, 100.0, 40.0]]])
+
+        with patch("cv2.HoughCircles", return_value=raw), patch(
+            "backend.circle_detection._circle_edge_support",
+            side_effect=[0.8, 0.3, 0.7],
+        ):
+            candidates, selected, confirmed, warnings = self.detector.detect(
+                image,
+                self.config(
+                    min_center_distance_px=50.0,
+                    min_radius_px=30,
+                    max_radius_px=50,
+                    expected_circle_count=2,
+                    min_candidate_score=0.5,
+                ),
+            )
+
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual([item.center_x for item in candidates], [80.0, 260.0])
+        self.assertEqual(selected, 0)
+        self.assertTrue(confirmed)
+        self.assertTrue(any("原始候选 3 个" in item for item in warnings))
+        self.assertTrue(any("去重后 2 个" in item for item in warnings))
+
+    def test_extra_candidates_keep_top_scores_then_sort_by_position(self):
+        image = np.zeros((300, 500), dtype=np.uint8)
+        raw = np.array([[[50.0, 100.0, 40.0],
+                         [250.0, 100.0, 40.0],
+                         [450.0, 100.0, 40.0]]])
+
+        with patch("cv2.HoughCircles", return_value=raw), patch(
+            "backend.circle_detection._circle_edge_support",
+            side_effect=[0.6, 0.9, 0.8],
+        ):
+            candidates, selected, confirmed, warnings = self.detector.detect(
+                image,
+                self.config(
+                    min_radius_px=30,
+                    max_radius_px=50,
+                    expected_circle_count=2,
+                    min_candidate_score=0.5,
+                ),
+            )
+
+        self.assertEqual([item.center_x for item in candidates], [250.0, 450.0])
+        self.assertEqual(selected, 0)
+        self.assertTrue(confirmed)
+        self.assertTrue(any("去重后检测到 3" in item for item in warnings))
 
     def test_downsampled_coordinates_are_restored_to_original_image(self):
         image = np.zeros((400, 400), dtype=np.uint8)
@@ -110,7 +187,32 @@ class HoughCircleDetectorTest(unittest.TestCase):
 
         self.assertEqual(len(candidates), 1)
         self.assertEqual(selected, 0)
+        self.assertFalse(confirmed)
         self.assertTrue(any("预期检测到 3" in item for item in warnings))
+
+    def test_any_low_score_selected_circle_prevents_overall_confirmation(self):
+        image = np.zeros((300, 400), dtype=np.uint8)
+        raw = np.array([[[80.0, 100.0, 40.0], [280.0, 100.0, 40.0]]])
+
+        with patch("cv2.HoughCircles", return_value=raw), patch(
+            "backend.circle_detection._circle_edge_support",
+            side_effect=[0.9, 0.2],
+        ):
+            candidates, selected, confirmed, warnings = self.detector.detect(
+                image,
+                self.config(
+                    min_radius_px=30,
+                    max_radius_px=50,
+                    expected_circle_count=2,
+                    min_candidate_score=0.5,
+                ),
+            )
+
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(selected, 0)
+        self.assertFalse(confirmed)
+        self.assertTrue(any("280.0, 100.0" in item for item in warnings))
+        self.assertTrue(any("低于自动确认阈值" in item for item in warnings))
 
     def test_no_circle_returns_empty_unconfirmed_result(self):
         image = np.zeros((200, 200), dtype=np.uint8)

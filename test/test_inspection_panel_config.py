@@ -5,6 +5,8 @@ import os
 import sys
 import unittest
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import Qt
@@ -14,8 +16,14 @@ from PyQt5.QtWidgets import QApplication, QTableWidgetItem
 from backend.inspection_config import InspectionConfig
 from backend.inspection_types import (
     CircleCandidate,
+    CircleInspectionResult,
+    ImageInspectionResult,
     InspectionRegionRule,
     InspectionResult,
+    InspectionStatus,
+    RegionInspectionResult,
+    RoiRegion,
+    SegmentationInstance,
 )
 from gui.app.widgets.inspection_panel import InspectionPanel
 
@@ -198,6 +206,145 @@ class InspectionPanelConfigTest(unittest.TestCase):
 
         self.assertFalse(self.panel.confirm_circle_btn.isEnabled())
         self.assertEqual(self.panel.confirm_circle_btn.text(), "当前圆心已确认")
+
+    def test_multi_circle_result_has_no_default_selection_and_shows_all_rows(self):
+        config = _valid_config()
+        config.circle.expected_circle_count = 2
+        result = ImageInspectionResult(
+            image_id="inspection-000001",
+            image_width=200,
+            image_height=100,
+            expected_circle_count=2,
+            detected_circle_count=2,
+            completed_circle_count=2,
+            is_complete=True,
+            status=InspectionStatus.FAIL,
+            timings_ms={"inference": 12.0, "total": 20.0},
+            circle_results=[
+                CircleInspectionResult(
+                    circle_id="circle-001",
+                    circle_candidate=CircleCandidate(
+                        center_x=40,
+                        center_y=50,
+                        radius_px=15,
+                        score=0.9,
+                    ),
+                    roi=RoiRegion(x=20, y=30, width=40, height=40),
+                    completed=True,
+                    circle_confirmed=True,
+                    status=InspectionStatus.PASS,
+                    instances=[SegmentationInstance(
+                        polygon=[(25, 35), (55, 35), (55, 65)],
+                    )],
+                    region_results=[RegionInspectionResult(
+                        region_id="center",
+                        region_name="中心区",
+                        class_id=0,
+                        class_name="异物",
+                        valid_instance_count=1,
+                    )],
+                ),
+                CircleInspectionResult(
+                    circle_id="circle-002",
+                    circle_candidate=CircleCandidate(
+                        center_x=140,
+                        center_y=50,
+                        radius_px=15,
+                        score=0.8,
+                    ),
+                    roi=RoiRegion(x=120, y=30, width=40, height=40),
+                    completed=True,
+                    circle_confirmed=True,
+                    status=InspectionStatus.FAIL,
+                    instances=[SegmentationInstance(
+                        polygon=[(125, 35), (155, 35), (155, 65)],
+                    )],
+                    region_results=[RegionInspectionResult(
+                        region_id="center",
+                        region_name="中心区",
+                        class_id=0,
+                        class_name="异物",
+                        valid_instance_count=3,
+                        passed=False,
+                    )],
+                ),
+            ],
+        )
+
+        self.panel.present_image_inspection_result(
+            result.image_id,
+            np.zeros((100, 200, 3), dtype=np.uint8),
+            result,
+            config,
+        )
+
+        self.assertEqual(self.panel.circle_result_table.rowCount(), 2)
+        self.assertEqual(self.panel.circle_result_table.currentRow(), -1)
+        self.assertEqual(
+            self.panel.circle_detail_label.text(),
+            "请选择端面查看详细结果",
+        )
+        self.assertEqual(self.panel.verdict_label.text(), "不合格")
+        self.assertEqual(self.panel.rule_table.item(0, 5).text(), "--")
+        self.assertEqual(
+            self.panel.circle_result_table.item(0, 0).text(),
+            "circle-001",
+        )
+        self.assertEqual(
+            self.panel.circle_result_table.item(1, 1).text(),
+            "不合格",
+        )
+
+    def test_multi_circle_selection_only_updates_right_side_details(self):
+        config = _valid_config()
+        config.circle.expected_circle_count = 2
+        result = ImageInspectionResult(
+            image_id="inspection-000002",
+            image_width=100,
+            image_height=60,
+            expected_circle_count=2,
+            detected_circle_count=2,
+            completed_circle_count=2,
+            is_complete=True,
+            status=InspectionStatus.FAIL,
+            circle_results=[
+                CircleInspectionResult(
+                    circle_id="circle-001",
+                    status=InspectionStatus.PASS,
+                    completed=True,
+                ),
+                CircleInspectionResult(
+                    circle_id="circle-002",
+                    status=InspectionStatus.FAIL,
+                    completed=True,
+                    region_results=[RegionInspectionResult(
+                        region_id="center",
+                        region_name="中心区",
+                        class_id=0,
+                        class_name="异物",
+                        valid_instance_count=3,
+                        passed=False,
+                    )],
+                ),
+            ],
+        )
+        self.panel.present_image_inspection_result(
+            result.image_id,
+            np.zeros((60, 100, 3), dtype=np.uint8),
+            result,
+            config,
+        )
+        pixmap_key = self.panel._image_item.pixmap().cacheKey()
+
+        self.panel.circle_result_table.selectRow(1)
+        self.app.processEvents()
+
+        self.assertIn("circle-002", self.panel.circle_detail_label.text())
+        self.assertEqual(self.panel.rule_table.item(0, 5).text(), "3")
+        self.assertEqual(
+            self.panel._image_item.pixmap().cacheKey(),
+            pixmap_key,
+        )
 
 
 if __name__ == "__main__":

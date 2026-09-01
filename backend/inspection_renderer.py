@@ -9,6 +9,7 @@ import numpy as np
 CLASS_COLORS_BGR = ((0, 0, 255),)
 CIRCLE_COLOR_BGR = (0, 220, 255)
 CENTER_COLOR_BGR = (0, 0, 255)
+ROI_COLOR_BGR = (255, 200, 0)
 RING_COLORS_BGR = (
     (80, 255, 80),
     (0, 165, 255),
@@ -51,6 +52,47 @@ def render_inspection_overlay(
     return canvas
 
 
+def render_image_inspection_overlay(
+    image,
+    result,
+    config,
+    *,
+    background: str = "original",
+    show_contours: bool = True,
+    show_circle: bool = True,
+    show_rings: bool = True,
+    show_rois: bool = True,
+):
+    """绘制一张原图内所有端面，不根据 GUI 当前选择过滤结果。"""
+
+    canvas = _prepare_canvas(image, background)
+    height, width = canvas.shape[:2]
+    line_width = max(1, round(min(width, height) / 1000))
+    circle_results = list(getattr(result, "circle_results", []) or [])
+
+    # 结构辅助线先画，红色缺陷轮廓最后画，避免缺陷被圆环覆盖。
+    for circle_result in circle_results:
+        roi = getattr(circle_result, "roi", None)
+        circle = getattr(circle_result, "circle_candidate", None)
+        if show_rois and roi is not None:
+            _draw_roi(canvas, roi, line_width)
+        if circle is not None:
+            if show_rings:
+                _draw_region_rings(canvas, circle, config, line_width)
+            if show_circle:
+                _draw_selected_circle(canvas, circle, line_width)
+
+    if show_contours:
+        for circle_result in circle_results:
+            _draw_instances(
+                canvas,
+                getattr(circle_result, "instances", []) or [],
+                line_width,
+            )
+
+    return canvas
+
+
 def _prepare_canvas(image, background: str):
     if image is None or getattr(image, "ndim", 0) not in (2, 3):
         raise ValueError("绘制质检结果需要有效图像")
@@ -74,8 +116,16 @@ def _prepare_canvas(image, background: str):
 
 
 def _draw_instance_contours(canvas, result, line_width: int):
+    _draw_instances(
+        canvas,
+        getattr(result, "instances", []) or [],
+        line_width,
+    )
+
+
+def _draw_instances(canvas, instances, line_width: int):
     height, width = canvas.shape[:2]
-    for instance in getattr(result, "instances", []) or []:
+    for instance in instances:
         points = _polygon_points(
             getattr(instance, "polygon", []),
             width,
@@ -93,6 +143,34 @@ def _draw_instance_contours(canvas, result, line_width: int):
             thickness=line_width,
             lineType=cv2.LINE_AA,
         )
+
+
+def _draw_roi(canvas, roi, line_width: int):
+    height, width = canvas.shape[:2]
+    try:
+        left = int(getattr(roi, "x"))
+        top = int(getattr(roi, "y"))
+        roi_width = int(getattr(roi, "width"))
+        roi_height = int(getattr(roi, "height"))
+    except (TypeError, ValueError):
+        return
+    if roi_width <= 0 or roi_height <= 0:
+        return
+
+    right = min(width - 1, left + roi_width - 1)
+    bottom = min(height - 1, top + roi_height - 1)
+    left = max(0, left)
+    top = max(0, top)
+    if left > right or top > bottom:
+        return
+    cv2.rectangle(
+        canvas,
+        (left, top),
+        (right, bottom),
+        ROI_COLOR_BGR,
+        line_width,
+        cv2.LINE_AA,
+    )
 
 
 def _polygon_points(polygon, width: int, height: int):

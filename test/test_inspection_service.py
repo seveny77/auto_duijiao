@@ -12,6 +12,7 @@ from PyQt5.QtCore import QCoreApplication, QThread
 from backend.inspection_config import InspectionConfig
 from backend.inspection_types import (
     CircleCandidate,
+    ImageInspectionResult,
     InspectionResult,
     InspectionStatus,
     SegmentationInstance,
@@ -27,6 +28,7 @@ class FakeSegmentationService:
         self.loaded = False
         self.fail_load = False
         self.fail_predict = False
+        self.fail_predict_calls = set()
         self.load_thread = None
         self.predict_thread = None
         self.predict_calls = []
@@ -46,9 +48,10 @@ class FakeSegmentationService:
     def predict(self, image, **kwargs):
         self.predict_thread = QThread.currentThread()
         self.predict_calls.append((image, kwargs))
+        call_number = len(self.predict_calls)
         if self.predict_gate is not None:
             self.predict_gate.wait(timeout=2.0)
-        if self.fail_predict:
+        if self.fail_predict or call_number in self.fail_predict_calls:
             self.fail_predict = False
             raise RuntimeError("predict failed")
         return [SegmentationInstance(
@@ -69,23 +72,38 @@ class FakeCircleDetector:
         self.calls = []
         self.detect_gate = None
         self.detect_thread = None
+        self.return_value = None
 
     def detect(self, image, config):
         self.detect_thread = QThread.currentThread()
         self.calls.append((image, config))
         if self.detect_gate is not None:
             self.detect_gate.wait(timeout=2.0)
-        return [CircleCandidate(center_x=10, center_y=10, score=0.9)], 0, True, []
+        if self.return_value is not None:
+            return self.return_value
+        image_height, image_width = image.shape[:2]
+        return [CircleCandidate(
+            center_x=image_width / 2.0,
+            center_y=image_height / 2.0,
+            radius_px=max(1.0, min(image_width, image_height) / 4.0),
+            score=0.9,
+        )], 0, True, []
 
 
 class FakeRuleEngine:
     def __init__(self):
         self.calls = []
+        self.statuses = []
 
     def evaluate(self, **kwargs):
         self.calls.append(kwargs)
+        status = (
+            self.statuses.pop(0)
+            if self.statuses
+            else InspectionStatus.PASS
+        )
         return InspectionResult(
-            status=InspectionStatus.PASS,
+            status=status,
             image_width=kwargs["image_width"],
             image_height=kwargs["image_height"],
             instances=list(kwargs["instances"]),
@@ -183,8 +201,14 @@ class InspectionServiceTest(unittest.TestCase):
     def test_visual_ready_returns_the_image_for_the_same_task(self):
         self._load_model()
         completed = []
+        multi_completed = []
         self.service.inspection_visual_ready.connect(
             lambda task_id, image, result, config: completed.append(
+                (task_id, image, result, config)
+            )
+        )
+        self.service.image_inspection_visual_ready.connect(
+            lambda task_id, image, result, config: multi_completed.append(
                 (task_id, image, result, config)
             )
         )
@@ -192,11 +216,16 @@ class InspectionServiceTest(unittest.TestCase):
 
         task_id = self.service.submit_image(image, self.config)
         self.assertTrue(self._wait_until(lambda: len(completed) == 1))
+        self.assertTrue(self._wait_until(lambda: len(multi_completed) == 1))
 
         self.assertEqual(completed[0][0], task_id)
         self.assertIs(completed[0][1], image)
         self.assertEqual(completed[0][2].status, InspectionStatus.PASS)
         self.assertEqual(completed[0][3].inference_imgsz, 640)
+        self.assertEqual(multi_completed[0][0], task_id)
+        self.assertIs(multi_completed[0][1], image)
+        self.assertIsInstance(multi_completed[0][2], ImageInspectionResult)
+        self.assertEqual(multi_completed[0][3].inference_imgsz, 640)
 
     def test_duplicate_is_ignored_and_busy_queue_keeps_latest_image(self):
         self._load_model()
@@ -220,7 +249,10 @@ class InspectionServiceTest(unittest.TestCase):
 
         self.assertTrue(self._wait_until(lambda: len(completed) == 2))
         self.assertEqual(completed, [first_id, latest_id])
-        self.assertIs(self.segmentation.predict_calls[1][0], latest)
+        np.testing.assert_array_equal(
+            self.segmentation.predict_calls[1][0],
+            latest,
+        )
 
     def test_predict_error_returns_error_and_service_recovers(self):
         self._load_model()
@@ -254,7 +286,7 @@ class InspectionServiceTest(unittest.TestCase):
             640,
         )
 
-    def test_circle_redetection_reuses_instances_without_predicting(self):
+    def test_circle_redetection_rebuilds_roi_and_predicts_again(self):
         self._load_model()
         completed = []
         self.service.inspection_visual_ready.connect(
@@ -287,10 +319,13 @@ class InspectionServiceTest(unittest.TestCase):
             and self.service.state == InspectionState.READY
         ))
 
-        self.assertEqual(len(self.segmentation.predict_calls), predict_count)
+        self.assertEqual(
+            len(self.segmentation.predict_calls),
+            predict_count + 1,
+        )
         self.assertEqual(len(self.circle.calls), circle_count + 1)
         self.assertEqual(redetected[0][0], task_id)
-        self.assertIs(
+        self.assertIsNot(
             redetected[0][1].instances[0],
             source_result.instances[0],
         )
@@ -299,6 +334,208 @@ class InspectionServiceTest(unittest.TestCase):
             redetected[0][1].timings_ms,
         )
         self.assertIsNot(self.circle.detect_thread, QThread.currentThread())
+
+    def test_multiple_circles_are_cropped_in_order_and_restored(self):
+        self._load_model()
+        self.config.roi_size_px = 40
+        self.config.circle.expected_circle_count = 2
+        self.circle.return_value = (
+            [
+                CircleCandidate(
+                    center_x=40,
+                    center_y=50,
+                    radius_px=15,
+                    score=0.8,
+                ),
+                CircleCandidate(
+                    center_x=140,
+                    center_y=50,
+                    radius_px=15,
+                    score=0.9,
+                ),
+            ],
+            1,
+            True,
+            [],
+        )
+        image = np.zeros((100, 200), dtype=np.uint8)
+        image[30:70, 20:60] = 10
+        image[30:70, 120:160] = 20
+        multi_results = []
+        compatibility_results = []
+        self.service.image_inspection_finished.connect(
+            lambda _task_id, result: multi_results.append(result)
+        )
+        self.service.inspection_finished.connect(
+            lambda _task_id, result: compatibility_results.append(result)
+        )
+
+        self.service.submit_image(image, self.config)
+        self.assertTrue(self._wait_until(lambda: len(multi_results) == 1))
+        self.assertTrue(self._wait_until(
+            lambda: len(compatibility_results) == 1
+        ))
+
+        result = multi_results[0]
+        self.assertIsInstance(result, ImageInspectionResult)
+        self.assertEqual(result.status, InspectionStatus.PASS)
+        self.assertTrue(result.is_complete)
+        self.assertEqual(result.detected_circle_count, 2)
+        self.assertEqual(result.completed_circle_count, 2)
+        self.assertEqual(
+            [item.circle_id for item in result.circle_results],
+            ["circle-001", "circle-002"],
+        )
+        self.assertEqual(len(self.segmentation.predict_calls), 2)
+        self.assertEqual(self.segmentation.predict_calls[0][0].shape, (40, 40))
+        self.assertEqual(self.segmentation.predict_calls[1][0].shape, (40, 40))
+        self.assertTrue(np.all(self.segmentation.predict_calls[0][0] == 10))
+        self.assertTrue(np.all(self.segmentation.predict_calls[1][0] == 20))
+        self.assertEqual(
+            result.circle_results[0].instances[0].bbox,
+            (21.0, 31.0, 22.0, 32.0),
+        )
+        self.assertEqual(
+            result.circle_results[1].instances[0].bbox,
+            (121.0, 31.0, 122.0, 32.0),
+        )
+        self.assertEqual(compatibility_results[0].selected_circle_index, 1)
+        self.assertEqual(
+            compatibility_results[0].instances[0].bbox,
+            (121.0, 31.0, 122.0, 32.0),
+        )
+
+    def test_missing_circle_creates_pending_placeholder(self):
+        self._load_model()
+        self.config.circle.expected_circle_count = 2
+        self.circle.return_value = (
+            [CircleCandidate(
+                center_x=10,
+                center_y=10,
+                radius_px=5,
+                score=0.9,
+            )],
+            0,
+            False,
+            ["预期检测到 2 个圆，Hough 去重后检测到 1 个"],
+        )
+        results = []
+        compatibility_results = []
+        self.service.image_inspection_finished.connect(
+            lambda _task_id, result: results.append(result)
+        )
+        self.service.inspection_finished.connect(
+            lambda _task_id, result: compatibility_results.append(result)
+        )
+
+        self.service.submit_image(np.zeros((20, 20), dtype=np.uint8), self.config)
+        self.assertTrue(self._wait_until(lambda: len(results) == 1))
+        self.assertTrue(self._wait_until(
+            lambda: len(compatibility_results) == 1
+        ))
+
+        result = results[0]
+        self.assertEqual(result.status, InspectionStatus.PENDING)
+        self.assertFalse(result.is_complete)
+        self.assertEqual(result.detected_circle_count, 1)
+        self.assertEqual(result.completed_circle_count, 1)
+        self.assertEqual(len(result.circle_results), 2)
+        self.assertTrue(result.circle_results[0].completed)
+        self.assertFalse(result.circle_results[1].completed)
+        self.assertIsNone(result.circle_results[1].circle_candidate)
+        self.assertFalse(compatibility_results[0].circle_confirmed)
+        self.assertEqual(
+            compatibility_results[0].status,
+            InspectionStatus.PENDING,
+        )
+
+    def test_low_score_circle_prevents_image_pass(self):
+        self._load_model()
+        self.config.circle.min_candidate_score = 0.5
+        self.circle.return_value = (
+            [CircleCandidate(
+                center_x=10,
+                center_y=10,
+                radius_px=5,
+                score=0.2,
+            )],
+            0,
+            False,
+            ["候选圆评分低于自动确认阈值"],
+        )
+        results = []
+        self.service.image_inspection_finished.connect(
+            lambda _task_id, result: results.append(result)
+        )
+
+        self.service.submit_image(np.zeros((20, 20), dtype=np.uint8), self.config)
+        self.assertTrue(self._wait_until(lambda: len(results) == 1))
+
+        self.assertEqual(results[0].status, InspectionStatus.PENDING)
+        self.assertFalse(results[0].is_complete)
+        self.assertFalse(results[0].circle_results[0].circle_confirmed)
+
+    def test_one_roi_error_does_not_stop_later_circles(self):
+        self._load_model()
+        self.config.roi_size_px = 20
+        self.config.circle.expected_circle_count = 2
+        self.circle.return_value = (
+            [
+                CircleCandidate(center_x=20, center_y=20, score=0.9),
+                CircleCandidate(center_x=60, center_y=20, score=0.8),
+            ],
+            0,
+            True,
+            [],
+        )
+        self.segmentation.fail_predict_calls = {1}
+        results = []
+        self.service.image_inspection_finished.connect(
+            lambda _task_id, result: results.append(result)
+        )
+
+        self.service.submit_image(np.zeros((40, 80), dtype=np.uint8), self.config)
+        self.assertTrue(self._wait_until(lambda: len(results) == 1))
+
+        result = results[0]
+        self.assertEqual(len(self.segmentation.predict_calls), 2)
+        self.assertEqual(result.status, InspectionStatus.ERROR)
+        self.assertFalse(result.is_complete)
+        self.assertEqual(result.completed_circle_count, 2)
+        self.assertEqual(
+            [item.status for item in result.circle_results],
+            [InspectionStatus.ERROR, InspectionStatus.PASS],
+        )
+        self.assertIn("circle-001", result.error)
+        self.assertIn("predict failed", result.error)
+
+    def test_any_failed_circle_makes_whole_image_fail(self):
+        self._load_model()
+        self.config.roi_size_px = 20
+        self.config.circle.expected_circle_count = 2
+        self.circle.return_value = (
+            [
+                CircleCandidate(center_x=20, center_y=20, score=0.9),
+                CircleCandidate(center_x=60, center_y=20, score=0.8),
+            ],
+            0,
+            True,
+            [],
+        )
+        self.engine.statuses = [
+            InspectionStatus.PASS,
+            InspectionStatus.FAIL,
+        ]
+        results = []
+        self.service.image_inspection_finished.connect(
+            lambda _task_id, result: results.append(result)
+        )
+
+        self.service.submit_image(np.zeros((40, 80), dtype=np.uint8), self.config)
+        self.assertTrue(self._wait_until(lambda: len(results) == 1))
+
+        self.assertEqual(results[0].status, InspectionStatus.FAIL)
+        self.assertTrue(results[0].is_complete)
 
     def test_busy_circle_redetection_rejects_duplicate_and_shutdown_waits(self):
         self._load_model()

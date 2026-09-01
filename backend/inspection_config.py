@@ -43,6 +43,10 @@ class InspectionConfig:
         default_factory=CircleDetectionConfig
     )
     region_rules: list[InspectionRegionRule] = field(default_factory=list)
+    # 后续以每个检测圆的圆心为中心裁切正方形，各端面共用此边长。
+    # 单位为原图像素；不随圆半径或 inference_imgsz 改变，也不附加边距。
+    # 1024 是待通过裁切预览确认的初始值。本阶段只持久化，不启用裁切。
+    roi_size_px: int = 1024
 
     def validate(self) -> list[str]:
         """返回全部配置错误；空列表表示配置可用于检测。"""
@@ -61,6 +65,10 @@ class InspectionConfig:
             0 <= self.inference_confidence_floor <= 1
         ):
             errors.append("分割推理置信度下限必须在 0～1 之间")
+
+        roi_error = _roi_size_error(self.roi_size_px)
+        if roi_error:
+            errors.append(roi_error)
 
         errors.extend(_validate_circle_config(self.circle))
         errors.extend(_validate_region_rules(self.region_rules))
@@ -103,6 +111,10 @@ class InspectionConfigStore:
     def save(self, config: InspectionConfig):
         """原子保存配置，避免中途退出留下不完整 JSON。"""
 
+        roi_error = _roi_size_error(config.roi_size_px)
+        if roi_error:
+            raise ValueError(roi_error)
+
         parent = os.path.dirname(self._path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -131,6 +143,10 @@ def inspection_config_from_dict(payload: dict[str, Any]) -> InspectionConfig:
     defaults = InspectionConfig()
     circle_payload = payload.get("circle", {})
     rules_payload = payload.get("region_rules", [])
+    roi_size_px = payload.get("roi_size_px", defaults.roi_size_px)
+    roi_error = _roi_size_error(roi_size_px)
+    if roi_error:
+        raise ValueError(roi_error)
 
     if not isinstance(circle_payload, dict):
         raise ValueError("circle 必须是 JSON 对象")
@@ -192,7 +208,16 @@ def inspection_config_from_dict(payload: dict[str, Any]) -> InspectionConfig:
         history_root=str(payload.get("history_root", defaults.history_root)),
         circle=circle,
         region_rules=rules,
+        roi_size_px=roi_size_px,
     )
+
+
+def _roi_size_error(value: Any) -> str:
+    """不将小数截断或把布尔值当成像素数；ROI 边长无需为 32 的倍数。"""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return "ROI 边长 roi_size_px 必须是大于 0 的整数（原图像素）"
+    return ""
 
 
 def _region_rule_from_dict(payload: dict[str, Any]) -> InspectionRegionRule:

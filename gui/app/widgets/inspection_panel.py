@@ -8,6 +8,7 @@
 import copy
 
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -36,8 +37,14 @@ from PyQt5.QtWidgets import (
 )
 
 from backend.inspection_config import InspectionConfig
-from backend.inspection_renderer import render_inspection_overlay
-from backend.inspection_types import InspectionRegionRule
+from backend.inspection_renderer import (
+    render_image_inspection_overlay,
+    render_inspection_overlay,
+)
+from backend.inspection_types import (
+    ImageInspectionResult,
+    InspectionRegionRule,
+)
 from gui.app.widgets.image_view import ImageWidget, ZoomableGraphicsView
 
 
@@ -55,6 +62,8 @@ class InspectionPanel(QWidget):
         super().__init__(parent)
         self._original_image = None
         self._inspection_result = None
+        self._image_inspection_result = None
+        self._selected_circle_result = None
         self._inspection_config = None
         self._base_inspection_config = InspectionConfig()
         self._model_class_names = {0: "异物", 1: "脏污"}
@@ -94,6 +103,9 @@ class InspectionPanel(QWidget):
         )
         self.region_table.itemChanged.connect(self._schedule_recalculation)
         self.rule_table.itemChanged.connect(self._schedule_recalculation)
+        self.circle_result_table.itemSelectionChanged.connect(
+            self._on_circle_result_selection_changed
+        )
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -190,7 +202,7 @@ class InspectionPanel(QWidget):
         verdict_box = QFrame()
         verdict_box.setObjectName("inspectionVerdictBox")
         verdict_layout = QVBoxLayout(verdict_box)
-        verdict_caption = QLabel("当前判定")
+        verdict_caption = QLabel("整图判定")
         verdict_caption.setAlignment(Qt.AlignCenter)
         self.verdict_label = QLabel("待检测")
         self.verdict_label.setObjectName("inspectionVerdict")
@@ -212,7 +224,7 @@ class InspectionPanel(QWidget):
         self.image_size_label = QLabel("--")
         self.inference_time_label = QLabel("--")
         self.total_time_label = QLabel("--")
-        metrics_form.addRow("有效缺陷实例：", self.instance_count_label)
+        metrics_form.addRow("缺陷实例总数：", self.instance_count_label)
         metrics_form.addRow("找圆结果：", self.circle_result_label)
         metrics_form.addRow("原图尺寸：", self.image_size_label)
         metrics_form.addRow("模型推理：", self.inference_time_label)
@@ -228,16 +240,49 @@ class InspectionPanel(QWidget):
         layout = QVBoxLayout(page)
         layout.setSpacing(8)
         layout.addWidget(self._build_summary_page())
+        layout.addWidget(self._build_circle_result_group())
         layout.addWidget(self._build_rule_page(), 1)
         return page
+
+    def _build_circle_result_group(self) -> QGroupBox:
+        group = QGroupBox("端面结果")
+        layout = QVBoxLayout(group)
+        self.circle_result_table = QTableWidget(0, 5)
+        self.circle_result_table.setHorizontalHeaderLabels([
+            "端面",
+            "状态",
+            "圆评分",
+            "ROI",
+            "缺陷数",
+        ])
+        self.circle_result_table.verticalHeader().setVisible(False)
+        self.circle_result_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self.circle_result_table.setSelectionBehavior(
+            QAbstractItemView.SelectRows
+        )
+        self.circle_result_table.setSelectionMode(
+            QAbstractItemView.SingleSelection
+        )
+        self.circle_result_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers
+        )
+        self.circle_result_table.setMinimumHeight(120)
+        layout.addWidget(self.circle_result_table)
+
+        self.circle_detail_label = QLabel("请选择端面查看详细结果")
+        self.circle_detail_label.setWordWrap(True)
+        layout.addWidget(self.circle_detail_label)
+        return group
 
     def _build_rule_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
 
         hint = QLabel(
-            "规则按“圆环区域 × 缺陷类别”配置；当前仅展示布局，"
-            "后续修改参数时只重新统计，不重复运行分割模型。"
+            "规则按“圆环区域 × 缺陷类别”配置；点击上方端面行"
+            "查看该端面的统计结果。"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -699,7 +744,7 @@ class InspectionPanel(QWidget):
         self.inspection_config_save_requested.emit(config)
 
     def _request_circle_redetection(self):
-        """收集当前参数并请求后台只重新执行 Hough。"""
+        """收集当前参数，请求重新找圆并按新 ROI 重跑分割。"""
 
         try:
             config = self.build_inspection_config()
@@ -775,7 +820,10 @@ class InspectionPanel(QWidget):
 
         self._original_image = original_image
         self._inspection_result = result
+        self._image_inspection_result = None
+        self._selected_circle_result = None
         self._inspection_config = config
+        self._clear_circle_result_table()
         self.image_placeholder.hide()
         self._image_view.show()
         self.fit_image_btn.setEnabled(True)
@@ -785,20 +833,177 @@ class InspectionPanel(QWidget):
         self._update_circle_controls(result)
         self._refresh_result_image(reset_view=True)
 
+    def present_image_inspection_result(
+        self,
+        task_id: str,
+        original_image,
+        result: ImageInspectionResult,
+        config,
+    ):
+        """展示整图多端面结果；不自动选择端面。"""
+
+        if not isinstance(result, ImageInspectionResult):
+            raise TypeError("result 必须是 ImageInspectionResult")
+        self._original_image = original_image
+        self._inspection_result = None
+        self._image_inspection_result = result
+        self._selected_circle_result = None
+        self._inspection_config = config
+        self.image_placeholder.hide()
+        self._image_view.show()
+        self.fit_image_btn.setEnabled(True)
+        self.reset_view_btn.setEnabled(True)
+        self._update_image_result_summary(task_id, result)
+        self._populate_circle_result_table(result)
+        self._update_rule_results(None, config)
+        self._update_image_circle_controls(result)
+        self._refresh_result_image(reset_view=True)
+
+    def present_image_recalculated_result(
+        self,
+        task_id: str,
+        result: ImageInspectionResult,
+        config,
+    ):
+        """刷新重新找圆后的多端面结果，并清除原端面选择。"""
+
+        if self._original_image is None:
+            return
+        if not isinstance(result, ImageInspectionResult):
+            raise TypeError("result 必须是 ImageInspectionResult")
+        self._inspection_result = None
+        self._image_inspection_result = result
+        self._selected_circle_result = None
+        self._inspection_config = config
+        self._update_image_result_summary(task_id, result)
+        self._populate_circle_result_table(result)
+        self._update_rule_results(None, config)
+        self._update_image_circle_controls(result)
+        self._refresh_result_image(reset_view=False)
+
     def present_recalculated_result(self, task_id: str, result, config):
         """刷新当前图的复判结果，不替换原图，也不重置缩放位置。"""
 
         if self._original_image is None:
             return
         self._inspection_result = result
+        self._image_inspection_result = None
+        self._selected_circle_result = None
         self._inspection_config = config
+        self._clear_circle_result_table()
         self._update_result_summary(task_id, result)
         self._update_rule_results(result, config)
         self._update_circle_controls(result)
         self._refresh_result_image(reset_view=False)
 
+    def _populate_circle_result_table(self, result: ImageInspectionResult):
+        """填充端面总览并显式保持无默认选择。"""
+
+        circle_results = list(result.circle_results or [])
+        self.circle_result_table.blockSignals(True)
+        try:
+            self.circle_result_table.clearContents()
+            self.circle_result_table.setRowCount(len(circle_results))
+            for row, circle_result in enumerate(circle_results):
+                candidate = circle_result.circle_candidate
+                roi = circle_result.roi
+                status_text, status_color = _status_display(
+                    circle_result.status
+                )
+                values = (
+                    circle_result.circle_id or f"circle-{row + 1:03d}",
+                    status_text,
+                    (
+                        f"{float(candidate.score):.3f}"
+                        if candidate is not None else "--"
+                    ),
+                    (
+                        f"{int(roi.width)}×{int(roi.height)}"
+                        if roi is not None else "--"
+                    ),
+                    (
+                        str(len(circle_result.instances))
+                        if circle_result.completed else "--"
+                    ),
+                )
+                for column, value in enumerate(values):
+                    item = _readonly_item(value)
+                    if column == 0:
+                        item.setData(Qt.UserRole, row)
+                    if column == 1:
+                        item.setForeground(QColor(status_color))
+                    self.circle_result_table.setItem(row, column, item)
+            self.circle_result_table.clearSelection()
+            self.circle_result_table.setCurrentCell(-1, -1)
+        finally:
+            self.circle_result_table.blockSignals(False)
+        self.circle_detail_label.setText("请选择端面查看详细结果")
+
+    def _clear_circle_result_table(self):
+        self.circle_result_table.blockSignals(True)
+        try:
+            self.circle_result_table.clearContents()
+            self.circle_result_table.setRowCount(0)
+            self.circle_result_table.clearSelection()
+            self.circle_result_table.setCurrentCell(-1, -1)
+        finally:
+            self.circle_result_table.blockSignals(False)
+        self.circle_detail_label.setText("请选择端面查看详细结果")
+
+    def _on_circle_result_selection_changed(self):
+        """只刷新右侧详情和规则统计，不改动左侧叠加图。"""
+
+        result = self._image_inspection_result
+        if result is None:
+            return
+        row = self.circle_result_table.currentRow()
+        if row < 0 or row >= len(result.circle_results):
+            self._selected_circle_result = None
+            self.circle_detail_label.setText("请选择端面查看详细结果")
+            self._update_rule_results(None, self._inspection_config)
+            return
+
+        circle_result = result.circle_results[row]
+        self._selected_circle_result = circle_result
+        self.circle_detail_label.setText(
+            _circle_result_detail(circle_result)
+        )
+        self._update_rule_results(circle_result, self._inspection_config)
+
+    def _update_image_circle_controls(self, result: ImageInspectionResult):
+        """设置多端面找圆控件；端面人工确认留到后续步骤。"""
+
+        self._circle_operation_busy = False
+        self.find_circle_btn.setText("重新找圆")
+        circles = [
+            item.circle_candidate
+            for item in result.circle_results
+            if item.circle_candidate is not None
+        ]
+        self.circle_candidate_combo.blockSignals(True)
+        try:
+            self.circle_candidate_combo.clear()
+            for index, circle in enumerate(circles, start=1):
+                self.circle_candidate_combo.addItem(
+                    f"圆 {index}：中心({circle.center_x:.1f}, "
+                    f"{circle.center_y:.1f})，R={circle.radius_px:.1f}px，"
+                    f"评分={circle.score:.3f}"
+                )
+            if not circles:
+                self.circle_candidate_combo.addItem("尚无候选圆")
+            self.circle_candidate_combo.setCurrentIndex(-1)
+        finally:
+            self.circle_candidate_combo.blockSignals(False)
+
+        self.find_circle_btn.setEnabled(self._original_image is not None)
+        self.confirm_circle_btn.setEnabled(False)
+        self.confirm_circle_btn.setText("多端面确认暂未开放")
+        status_text, _color = _status_display(result.status)
+        self.state_badge.setText(f"整图{status_text}")
+        self.state_badge.setToolTip("")
+
     def _update_circle_controls(self, result):
-        """候选框只展示信息；算法固定使用评分最高的第一个圆。"""
+        """按位置展示选中圆；当前项指向其中评分最高的圆。"""
 
         self._circle_operation_busy = False
         self.find_circle_btn.setText("重新找圆")
@@ -853,15 +1058,27 @@ class InspectionPanel(QWidget):
             display_image = self._original_image.copy()
         else:
             background = "black" if mode == "仅缺陷轮廓" else "original"
-            display_image = render_inspection_overlay(
-                self._original_image,
-                self._inspection_result,
-                self._inspection_config,
-                background=background,
-                show_contours=self.show_masks_check.isChecked(),
-                show_circle=self.show_circle_check.isChecked(),
-                show_rings=self.show_rings_check.isChecked(),
-            )
+            if self._image_inspection_result is not None:
+                display_image = render_image_inspection_overlay(
+                    self._original_image,
+                    self._image_inspection_result,
+                    self._inspection_config,
+                    background=background,
+                    show_contours=self.show_masks_check.isChecked(),
+                    show_circle=self.show_circle_check.isChecked(),
+                    show_rings=self.show_rings_check.isChecked(),
+                    show_rois=True,
+                )
+            else:
+                display_image = render_inspection_overlay(
+                    self._original_image,
+                    self._inspection_result,
+                    self._inspection_config,
+                    background=background,
+                    show_contours=self.show_masks_check.isChecked(),
+                    show_circle=self.show_circle_check.isChecked(),
+                    show_rings=self.show_rings_check.isChecked(),
+                )
 
         pixmap = ImageWidget._numpy_to_pixmap(display_image)
         self._image_item.setPixmap(pixmap)
@@ -939,6 +1156,56 @@ class InspectionPanel(QWidget):
         self.inference_time_label.setText(_format_ms(timings.get("inference")))
         self.total_time_label.setText(_format_ms(timings.get("total")))
 
+    def _update_image_result_summary(
+        self,
+        task_id: str,
+        result: ImageInspectionResult,
+    ):
+        status_value = getattr(result.status, "value", "")
+        verdict = {
+            "PASS": "合格",
+            "FAIL": "不合格",
+            "PENDING": "待确认",
+            "ERROR": "检测错误",
+        }.get(status_value, "待确认")
+        self.verdict_label.setText(verdict)
+        if status_value == "FAIL":
+            color = "#dc2626"
+        elif status_value == "PASS":
+            color = "#16a34a"
+        elif status_value == "ERROR":
+            color = "#ea580c"
+        else:
+            color = "#64748b"
+        self.verdict_label.setStyleSheet(
+            f"color: {color}; font-size: 30px; font-weight: 700;"
+        )
+        self.verdict_detail_label.setText(
+            f"任务：{task_id}\n"
+            f"端面：{result.detected_circle_count}/"
+            f"{result.expected_circle_count}，"
+            f"已处理：{result.completed_circle_count}"
+        )
+        self.instance_count_label.setText(str(sum(
+            len(item.instances)
+            for item in result.circle_results
+        )))
+        self.circle_result_label.setText(
+            f"检测 {result.detected_circle_count}/"
+            f"{result.expected_circle_count}，"
+            f"完成 {result.completed_circle_count}"
+        )
+        self.image_size_label.setText(
+            f"{result.image_width} × {result.image_height}"
+            if result.image_width and result.image_height else "--"
+        )
+        self.inference_time_label.setText(
+            _format_ms(result.timings_ms.get("inference"))
+        )
+        self.total_time_label.setText(
+            _format_ms(result.timings_ms.get("total"))
+        )
+
     def _update_rule_results(self, result, config):
         rules = list(getattr(config, "region_rules", []) or [])
         results = {
@@ -965,7 +1232,7 @@ class InspectionPanel(QWidget):
         self.circle_candidate_combo.addItem("尚无候选圆")
         self.circle_candidate_combo.setEnabled(False)
         self.circle_candidate_combo.setToolTip(
-            "仅展示 Hough 候选；当前固定使用评分最高的第一个圆"
+            "展示本次 Hough 找到并用于生成 ROI 的产品圆"
         )
         self.find_circle_btn = QPushButton("重新找圆")
         self.confirm_circle_btn = QPushButton("确认当前圆心")
@@ -1061,10 +1328,12 @@ class InspectionPanel(QWidget):
         self.add_region_btn.setToolTip("在末尾增加一个连续圆环")
         self.remove_region_btn.setToolTip("删除选中圆环，未选择时删除最后一行")
         self.find_circle_btn.setEnabled(False)
-        self.find_circle_btn.setToolTip("按当前半径范围对当前图重新执行 Hough")
+        self.find_circle_btn.setToolTip(
+            "按当前参数重新执行 Hough，并对新的 ROI 重新推理"
+        )
         self.confirm_circle_btn.setEnabled(False)
         self.confirm_circle_btn.setToolTip(
-            "确认评分最高的候选圆，然后只重新执行规则判定"
+            "确认评分最高的候选圆，然后重新执行规则判定"
         )
         self.fit_image_btn.setEnabled(False)
         self.reset_view_btn.setEnabled(False)
@@ -1158,3 +1427,42 @@ def _selected_circle(result):
     if not isinstance(index, int) or index < 0 or index >= len(candidates):
         return None
     return candidates[index]
+
+
+def _status_display(status) -> tuple[str, str]:
+    value = getattr(status, "value", str(status or ""))
+    return {
+        "PASS": ("合格", "#16a34a"),
+        "FAIL": ("不合格", "#dc2626"),
+        "PENDING": ("待确认", "#d97706"),
+        "ERROR": ("检测错误", "#b91c1c"),
+    }.get(value, ("待确认", "#64748b"))
+
+
+def _circle_result_detail(circle_result) -> str:
+    status_text, _color = _status_display(circle_result.status)
+    lines = [
+        f"当前端面：{circle_result.circle_id or '--'} / {status_text}",
+    ]
+    circle = circle_result.circle_candidate
+    if circle is None:
+        lines.append("圆：未找到")
+    else:
+        lines.append(
+            f"圆心：({circle.center_x:.1f}, {circle.center_y:.1f}) px，"
+            f"R={circle.radius_px:.1f} px，评分={circle.score:.3f}"
+        )
+    roi = circle_result.roi
+    if roi is None:
+        lines.append("ROI：--")
+    else:
+        lines.append(
+            f"ROI：x={roi.x}, y={roi.y}, "
+            f"{roi.width}×{roi.height} px"
+        )
+    lines.append(f"分割实例：{len(circle_result.instances)}")
+    if circle_result.error:
+        lines.append(f"错误：{circle_result.error}")
+    if circle_result.failure_reasons:
+        lines.append("判定原因：" + "；".join(circle_result.failure_reasons))
+    return "\n".join(lines)
