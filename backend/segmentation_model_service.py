@@ -12,6 +12,10 @@ from backend.inspection_types import SegmentationInstance
 
 logger = logging.getLogger(__name__)
 
+# 每个端面 ROI 的单次推理最多保留 20 个缺陷实例，防止高纹理图像
+# 触发 Ultralytics 默认的 300 个结果上限并给 CUDA/GUI 带来额外压力。
+MAX_DETECTIONS_PER_IMAGE = 20
+
 
 class SegmentationModelService:
     """持有一个分割模型；成功加载后本次进程不允许切换。"""
@@ -90,6 +94,7 @@ class SegmentationModelService:
             imgsz=int(imgsz),
             conf=float(confidence_floor),
             retina_masks=True,
+            max_det=MAX_DETECTIONS_PER_IMAGE,
             verbose=False,
         )
         warmup_ms = (time.perf_counter() - warmup_start) * 1000.0
@@ -124,11 +129,14 @@ class SegmentationModelService:
             imgsz=int(imgsz),
             conf=float(confidence_floor),
             retina_masks=True,
+            max_det=MAX_DETECTIONS_PER_IMAGE,
             verbose=False,
         )
         if results is None or len(results) != 1:
             raise RuntimeError("分割模型必须为单张输入返回一个结果")
-        return _convert_result(results[0], self._class_names)
+        instances = _convert_result(results[0], self._class_names)
+        # 即使第三方模型后端忽略 max_det，也在数据契约边界再次兜底。
+        return instances[:MAX_DETECTIONS_PER_IMAGE]
 
     def unload_for_shutdown(self):
         """仅供应用关闭时释放引用，不支持运行中切换模型。"""

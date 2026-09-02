@@ -1,12 +1,12 @@
 {
   "enabled": true,
   "model_path": "C:\\Autofocus\\model\\best - 0830.pt",
-  "inference_imgsz": 4096,
+  "inference_imgsz": 1024,
   "inference_confidence_floor": 0.1,
   "mm_per_pixel": 0.24,
   "history_root": "inspection_history",
   "circle": {
-    "downsample_factor": 4,
+    "downsample_factor": 8,
     "blur_kernel_size": 9,
     "hough_dp": 1.2,
     "hough_param1": 100.0,

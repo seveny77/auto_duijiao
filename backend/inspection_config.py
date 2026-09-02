@@ -19,6 +19,8 @@ class CircleDetectionConfig:
 
     downsample_factor: int = 4
     blur_kernel_size: int = 9
+    # 仅为兼容既有 inspection_config.json 保留；轮廓找圆运行时不读取。
+    # 后续配置版本迁移时再统一删除，避免本次算法切换破坏旧配置读取。
     hough_dp: float = 1.2
     hough_param1: float = 100.0
     hough_param2: float = 30.0
@@ -35,7 +37,7 @@ class InspectionConfig:
 
     enabled: bool = True
     model_path: str = ""
-    inference_imgsz: int = 4096
+    inference_imgsz: int = 1024
     inference_confidence_floor: float = 0.01
     mm_per_pixel: float = 0.0
     history_root: str = "inspection_history"

@@ -10,7 +10,10 @@ from pathlib import Path
 
 import numpy as np
 
-from backend.segmentation_model_service import SegmentationModelService
+from backend.segmentation_model_service import (
+    MAX_DETECTIONS_PER_IMAGE,
+    SegmentationModelService,
+)
 
 
 class FakeBoxes:
@@ -90,6 +93,7 @@ class SegmentationModelServiceTest(unittest.TestCase):
         self.assertEqual(len(factory_calls), 1)
         self.assertEqual(len(model.calls), 1)
         self.assertEqual(model.calls[0]["imgsz"], 1280)
+        self.assertEqual(model.calls[0]["max_det"], 20)
         self.assertEqual(service.class_names, {0: "异物", 1: "脏污"})
 
     def test_loaded_model_cannot_be_switched(self):
@@ -134,6 +138,38 @@ class SegmentationModelServiceTest(unittest.TestCase):
         self.assertEqual(instance.bbox, (10.0, 20.0, 30.0, 40.0))
         self.assertEqual(instance.pixel_area, 400)
         self.assertIsInstance(instance.polygon[0], tuple)
+        self.assertEqual(model.calls[-1]["max_det"], 20)
+
+    def test_predict_never_returns_more_than_twenty_instances(self):
+        count = MAX_DETECTIONS_PER_IMAGE + 5
+        boxes = [
+            [index, index, index + 2, index + 2]
+            for index in range(count)
+        ]
+        polygons = [
+            [
+                [index, index],
+                [index + 2, index],
+                [index + 2, index + 2],
+                [index, index + 2],
+            ]
+            for index in range(count)
+        ]
+        result = FakeResult(
+            FakeBoxes([0] * count, [0.9] * count, boxes),
+            FakeMasks(polygons),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.create_model_file(directory)
+            model = FakeModel(result)
+            service = SegmentationModelService(lambda _path: model)
+            service.load(str(path))
+            instances = service.predict(
+                np.zeros((100, 100, 3), dtype=np.uint8)
+            )
+
+        self.assertEqual(len(instances), MAX_DETECTIONS_PER_IMAGE)
+        self.assertEqual(model.calls[-1]["max_det"], 20)
 
     def test_empty_detection_is_valid_but_boxes_without_masks_fail(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""使用 OpenCV Hough 圆检测定位最终成像中的产品圆。"""
+"""使用局部背景校正和轮廓分析定位最终成像中的产品圆。"""
 
 import math
 from typing import Optional
@@ -8,8 +8,16 @@ from backend.inspection_config import CircleDetectionConfig
 from backend.inspection_types import CircleCandidate
 
 
-class HoughCircleDetector:
-    """在降采样图上检测、去重并选择配置数量的产品圆。"""
+# 这些是第一版固定的形状约束。它们不进入 GUI，避免一次引入过多参数。
+_MIN_CIRCULARITY = 0.55
+_MIN_ASPECT_RATIO = 0.75
+_MAX_ASPECT_RATIO = 1.30
+_BACKGROUND_SIGMA_RATIO = 1.20
+_OPEN_KERNEL_RADIUS_RATIO = 0.20
+
+
+class ContourCircleDetector:
+    """从不均匀背景中分离深色端面，再按轮廓形状筛选产品圆。"""
 
     def detect(
         self,
@@ -47,64 +55,66 @@ class HoughCircleDetector:
             (config.blur_kernel_size, config.blur_kernel_size),
             0,
         )
-        small_min_distance = max(
-            1.0,
-            config.min_center_distance_px / factor,
+        small_min_radius = config.min_radius_px / factor
+        small_max_radius = config.max_radius_px / factor
+        # 用几何平均而不是算术平均估计预处理尺度。这样旧配置里
+        # 100～2000 px 这类很宽的范围不会产生异常巨大的高斯核。
+        reference_radius = math.sqrt(
+            max(1.0, small_min_radius) * small_max_radius
         )
-        small_min_radius = max(
+
+        # 用大尺度模糊估计局部背景，再与小尺度模糊图相减。
+        # 这样深色端面会成为亮前景，能抵抗原图从左到右的亮度变化。
+        background_sigma = max(
+            20.0,
+            reference_radius * _BACKGROUND_SIGMA_RATIO,
+        )
+        background = cv2.GaussianBlur(
+            blurred,
+            (0, 0),
+            sigmaX=background_sigma,
+            sigmaY=background_sigma,
+        )
+        dark_response = cv2.subtract(background, blurred)
+        _threshold, binary = cv2.threshold(
+            dark_response,
             0,
-            int(round(config.min_radius_px / factor)),
-        )
-        small_max_radius = max(
-            small_min_radius + 1,
-            int(round(config.max_radius_px / factor)),
+            255,
+            cv2.THRESH_BINARY + cv2.THRESH_OTSU,
         )
 
-        raw_circles = cv2.HoughCircles(
-            blurred,
-            cv2.HOUGH_GRADIENT,
-            dp=config.hough_dp,
-            minDist=small_min_distance,
-            param1=config.hough_param1,
-            param2=config.hough_param2,
-            minRadius=small_min_radius,
-            maxRadius=small_max_radius,
+        open_kernel_size = _fit_odd_kernel_size(
+            reference_radius * _OPEN_KERNEL_RADIUS_RATIO,
+            min(binary.shape[:2]),
         )
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (open_kernel_size, open_kernel_size),
+        )
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
-        warnings: list[str] = []
-        if raw_circles is None or raw_circles.size == 0:
-            return [], None, False, ["Hough 圆检测未找到候选圆"]
-
-        edges = cv2.Canny(
-            blurred,
-            threshold1=max(1.0, config.hough_param1 * 0.5),
-            threshold2=config.hough_param1,
+        contours, _hierarchy = cv2.findContours(
+            binary,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
         )
         candidates = []
-        for center_x, center_y, radius in raw_circles[0]:
-            if not all(math.isfinite(float(value)) for value in (
-                center_x,
-                center_y,
-                radius,
-            )):
-                continue
-            if radius <= 0:
-                continue
-
-            score = _circle_edge_support(
-                edges,
-                float(center_x),
-                float(center_y),
-                float(radius),
-                np,
+        for contour in contours:
+            candidate = _candidate_from_contour(
+                contour,
+                image_width=binary.shape[1],
+                image_height=binary.shape[0],
+                small_min_radius=small_min_radius,
+                small_max_radius=small_max_radius,
+                factor=factor,
+                cv2=cv2,
             )
-            candidates.append(CircleCandidate(
-                center_x=float(center_x) * factor,
-                center_y=float(center_y) * factor,
-                radius_px=float(radius) * factor,
-                score=score,
-                source="hough",
-            ))
+            if candidate is not None:
+                candidates.append(candidate)
+
+        warnings: list[str] = []
+        if not candidates:
+            return [], None, False, ["轮廓找圆未找到候选圆"]
 
         candidates.sort(key=lambda item: item.score, reverse=True)
         raw_candidate_count = len(candidates)
@@ -114,24 +124,25 @@ class HoughCircleDetector:
         )
         detected_count = len(candidates)
         if detected_count == 0:
-            return [], None, False, ["Hough 圆检测未产生有效候选圆"]
+            return [], None, False, ["轮廓找圆未产生有效候选圆"]
 
         if raw_candidate_count != detected_count:
             warnings.append(
-                f"Hough 原始候选 {raw_candidate_count} 个，"
+                f"轮廓原始候选 {raw_candidate_count} 个，"
                 f"按圆心距离去重后 {detected_count} 个"
             )
 
         if detected_count != config.expected_circle_count:
             warnings.append(
                 f"预期检测到 {config.expected_circle_count} 个圆，"
-                f"Hough 去重后检测到 {detected_count} 个"
+                f"轮廓去重后检测到 {detected_count} 个"
             )
 
+        # 候选在此之前按圆度从高到低排列，所以超出预期时只取高分圆。
         selected_candidates = candidates[:config.expected_circle_count]
         highest_score_candidate = selected_candidates[0]
-        # 进入多 ROI 流程后使用这个位置顺序生成稳定的 circle-001 等编号；
-        # selected_index 仍指向评分最高的圆，保持当前单圆 GUI/规则引擎兼容。
+        # 使用位置顺序生成稳定的 circle-001 等编号；selected_index 仍指向
+        # 圆度最高的圆，保持现有单圆 GUI 和规则引擎兼容。
         selected_candidates.sort(
             key=lambda item: (item.center_x, item.center_y, item.radius_px)
         )
@@ -151,11 +162,82 @@ class HoughCircleDetector:
         for candidate in low_score_candidates:
             warnings.append(
                 f"候选圆中心({candidate.center_x:.1f}, {candidate.center_y:.1f})"
-                f"评分 {candidate.score:.3f} 低于自动确认阈值"
+                f"圆度评分 {candidate.score:.3f} 低于自动确认阈值"
                 f" {config.min_candidate_score:.3f}"
             )
 
         return selected_candidates, selected_index, confirmed, warnings
+
+
+class HoughCircleDetector(ContourCircleDetector):
+    """旧类名兼容入口；内部已经不再调用 HoughCircles。"""
+
+
+def _candidate_from_contour(
+    contour,
+    *,
+    image_width: int,
+    image_height: int,
+    small_min_radius: float,
+    small_max_radius: float,
+    factor: int,
+    cv2,
+) -> Optional[CircleCandidate]:
+    """将一个轮廓按面积、圆度、长宽比和边界条件转换为圆候选。"""
+
+    area = float(cv2.contourArea(contour))
+    perimeter = float(cv2.arcLength(contour, True))
+    if area <= 0 or perimeter <= 0:
+        return None
+
+    x, y, width, height = cv2.boundingRect(contour)
+    if (
+        x <= 0
+        or y <= 0
+        or x + width >= image_width
+        or y + height >= image_height
+    ):
+        # 贴边轮廓通常是画面边缘、阴影或未完整进入视野的端面。
+        return None
+
+    aspect_ratio = width / height
+    if not _MIN_ASPECT_RATIO <= aspect_ratio <= _MAX_ASPECT_RATIO:
+        return None
+
+    equivalent_radius = math.sqrt(area / math.pi)
+    if not small_min_radius <= equivalent_radius <= small_max_radius:
+        return None
+
+    circularity = 4.0 * math.pi * area / (perimeter * perimeter)
+    if not math.isfinite(circularity) or circularity < _MIN_CIRCULARITY:
+        return None
+
+    moments = cv2.moments(contour)
+    if moments["m00"] == 0:
+        return None
+    center_x = moments["m10"] / moments["m00"]
+    center_y = moments["m01"] / moments["m00"]
+
+    return CircleCandidate(
+        center_x=float(center_x) * factor,
+        center_y=float(center_y) * factor,
+        radius_px=float(equivalent_radius) * factor,
+        score=min(1.0, float(circularity)),
+        source="contour",
+    )
+
+
+def _fit_odd_kernel_size(requested_size: float, image_limit: int) -> int:
+    """生成不超过图像短边的正奇数形态学核尺寸。"""
+
+    kernel_size = max(3, int(round(requested_size)))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+
+    maximum = max(1, int(image_limit))
+    if maximum % 2 == 0:
+        maximum -= 1
+    return max(1, min(kernel_size, maximum))
 
 
 def _deduplicate_candidates(
@@ -180,21 +262,18 @@ def _deduplicate_candidates(
 
 
 def _validate_detection_config(config: CircleDetectionConfig) -> list[str]:
-    """只校验 Hough 检测直接依赖的参数。"""
+    """只校验轮廓找圆运行时直接依赖的参数。"""
 
     errors = []
     if config.downsample_factor < 1:
         errors.append("找圆降采样倍数必须至少为 1")
     if config.blur_kernel_size < 1 or config.blur_kernel_size % 2 == 0:
         errors.append("找圆模糊核尺寸必须是正奇数")
-    for name, value in (
-        ("Hough dp", config.hough_dp),
-        ("Hough param1", config.hough_param1),
-        ("Hough param2", config.hough_param2),
-        ("候选圆心最小距离", config.min_center_distance_px),
+    if (
+        not math.isfinite(config.min_center_distance_px)
+        or config.min_center_distance_px <= 0
     ):
-        if not math.isfinite(value) or value <= 0:
-            errors.append(f"{name} 必须大于 0")
+        errors.append("候选圆心最小距离必须大于 0")
     if config.min_radius_px < 0:
         errors.append("候选圆最小半径不能小于 0")
     if config.max_radius_px <= config.min_radius_px:
@@ -209,14 +288,14 @@ def _validate_detection_config(config: CircleDetectionConfig) -> list[str]:
 
 
 def _prepare_grayscale(image, cv2, np):
-    """检查输入图像并转换成 HoughCircles 需要的 uint8 灰度图。"""
+    """检查输入图像并转换成轮廓分析需要的 uint8 灰度图。"""
 
     if image is None:
-        raise ValueError("Hough 圆检测收到空图像")
+        raise ValueError("轮廓找圆收到空图像")
 
     array = np.asarray(image)
     if array.size == 0:
-        raise ValueError("Hough 圆检测收到空图像")
+        raise ValueError("轮廓找圆收到空图像")
 
     if array.ndim == 2:
         grayscale = array
@@ -227,14 +306,12 @@ def _prepare_grayscale(image, cv2, np):
     elif array.ndim == 3 and array.shape[2] == 4:
         grayscale = cv2.cvtColor(array, cv2.COLOR_BGRA2GRAY)
     else:
-        raise ValueError(
-            "Hough 圆检测只支持灰度图、BGR 图或 BGRA 图"
-        )
+        raise ValueError("轮廓找圆只支持灰度图、BGR 图或 BGRA 图")
 
     if grayscale.dtype != np.uint8:
         finite = np.isfinite(grayscale)
         if not finite.any():
-            raise ValueError("Hough 圆检测图像不包含有限像素")
+            raise ValueError("轮廓找圆图像不包含有限像素")
         safe = np.where(finite, grayscale, 0)
         grayscale = cv2.normalize(
             safe,
@@ -245,36 +322,3 @@ def _prepare_grayscale(image, cv2, np):
         ).astype(np.uint8)
 
     return np.ascontiguousarray(grayscale)
-
-
-def _circle_edge_support(
-    edges,
-    center_x: float,
-    center_y: float,
-    radius: float,
-    np,
-) -> float:
-    """计算候选圆周附近存在 Canny 边缘的采样点比例。"""
-
-    sample_count = 360
-    tolerance = 2
-    angles = np.linspace(
-        0.0,
-        2.0 * math.pi,
-        sample_count,
-        endpoint=False,
-    )
-    x_values = np.rint(center_x + radius * np.cos(angles)).astype(int)
-    y_values = np.rint(center_y + radius * np.sin(angles)).astype(int)
-
-    hits = 0
-    height, width = edges.shape[:2]
-    for x_value, y_value in zip(x_values, y_values):
-        left = max(0, x_value - tolerance)
-        right = min(width, x_value + tolerance + 1)
-        top = max(0, y_value - tolerance)
-        bottom = min(height, y_value + tolerance + 1)
-        if left < right and top < bottom and edges[top:bottom, left:right].any():
-            hits += 1
-
-    return hits / sample_count

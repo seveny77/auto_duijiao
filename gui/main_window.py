@@ -20,6 +20,9 @@ from gui.app.services.ct_logger import CtLogger
 from gui.app.services.result_presenter import ResultPresenter
 from gui.app.services.motion_service import MotionService
 from gui.app.services.inspection_service import InspectionService
+from gui.app.services.inspection_image_loader import (
+    load_inspection_image,
+)
 from gui.app.services.camera_service import CameraService
 from gui.app.services.live_view_service import LiveViewService
 from gui.app.services.focus_task_service import FocusTaskService
@@ -193,6 +196,9 @@ class MainWindow(QMainWindow):
         self.inspection_panel.model_load_requested.connect(
             self._on_inspection_model_load
         )
+        self.inspection_panel.offline_image_test_requested.connect(
+            self._on_offline_inspection_image
+        )
         self.inspection_panel.inspection_config_save_requested.connect(
             self._on_inspection_config_save
         )
@@ -218,7 +224,7 @@ class MainWindow(QMainWindow):
             self._on_inspection_model_load_failed
         )
         self.inspection_service.image_pending.connect(
-            lambda task_id: self._log(f"[检测] 最终图已排队，等待模型: {task_id}")
+            lambda task_id: self._log(f"[检测] 图像已排队，等待模型: {task_id}")
         )
         self.inspection_service.inspection_started.connect(
             lambda task_id: self.status_message.emit(
@@ -340,6 +346,54 @@ class MainWindow(QMainWindow):
 
         self.inspection_panel.set_model_load_failed(message)
         self._log(f"[检测] 模型加载失败: {message}")
+
+    def _on_offline_inspection_image(
+        self,
+        image_path: str,
+        config: InspectionConfig,
+    ):
+        """读取一张本地图并复用现有异步检测服务。"""
+
+        if not isinstance(config, InspectionConfig):
+            self._log("[检测] 本地图片测试配置类型无效")
+            return
+        errors = config.validate()
+        if errors:
+            self.status_message.emit("本地图片检测参数有误")
+            self._log(f"[检测] 本地图片未提交: {errors[0]}")
+            return
+
+        try:
+            image = load_inspection_image(image_path)
+        except ValueError as error:
+            self.status_message.emit("本地检测图片读取失败")
+            self._log(f"[检测] 本地图片读取失败: {error}")
+            QMessageBox.warning(
+                self,
+                "本地图片读取失败",
+                str(error),
+            )
+            return
+
+        try:
+            task_id = self.inspection_service.submit_image(image, config)
+        except (TypeError, ValueError) as error:
+            self.status_message.emit("本地检测图片提交失败")
+            self._log(f"[检测] 本地图片提交失败: {error}")
+            return
+
+        if not task_id:
+            self._log("[检测] 本地图片未提交，可能与当前任务重复")
+            return
+
+        absolute_path = os.path.abspath(image_path)
+        self.status_message.emit(
+            f"本地图片已提交检测：{os.path.basename(absolute_path)}"
+        )
+        self._log(
+            f"[检测] 已提交本地图片，任务号: {task_id}，"
+            f"路径: {absolute_path}"
+        )
 
     def _on_focus_finished(self, result):
         """展示结果，并刷新任务结束后的轴位置和伺服状态。"""

@@ -65,10 +65,10 @@ def prepare_dataset(
 
     annotations = {item.stem: item for item in annotation_root.glob("*.json")}
     image_by_stem = {item.stem: item for item in images}
+    # 没有同名 JSON 的图片按“无缺陷负样本”处理：输出空 YOLO 标签。
+    # 不修改源目录，也不为源图片伪造 LabelMe JSON。
     missing_annotations = sorted(set(image_by_stem) - set(annotations))
     missing_images = sorted(set(annotations) - set(image_by_stem))
-    if missing_annotations:
-        raise ValueError(f"图片缺少同名 JSON: {missing_annotations[:5]}")
     if missing_images:
         raise ValueError(f"JSON 缺少同名图片: {missing_images[:5]}")
 
@@ -88,13 +88,17 @@ def prepare_dataset(
 
     for stem in sorted(image_by_stem):
         image_path = image_by_stem[stem]
-        annotation_path = annotations[stem]
+        annotation_path = annotations.get(stem)
         split = assignments[stem]
-        lines, counts = _convert_annotation(
-            annotation_path,
-            image_path,
-            class_to_id,
-        )
+        if annotation_path is None:
+            # 空 txt 是 YOLO 标准的负样本表示：图片存在，但没有任何实例。
+            lines, counts = [], Counter()
+        else:
+            lines, counts = _convert_annotation(
+                annotation_path,
+                image_path,
+                class_to_id,
+            )
         class_counts.update(counts)
         shutil.copy2(image_path, output / "images" / split / image_path.name)
         label_path = output / "labels" / split / f"{stem}.txt"
@@ -118,6 +122,7 @@ def prepare_dataset(
         "class_counts": {
             name: class_counts.get(name, 0) for name in class_names
         },
+        "unannotated_image_count": len(missing_annotations),
     }
     _write_json(output / "classes.json", classes_payload)
     _write_json(output / "split_manifest.json", manifest)

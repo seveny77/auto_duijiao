@@ -52,6 +52,7 @@ class InspectionPanel(QWidget):
     """检测结果工作区的第一版可视化框架。"""
 
     model_load_requested = pyqtSignal(str)
+    offline_image_test_requested = pyqtSignal(str, object)
     inspection_config_save_requested = pyqtSignal(object)
     inspection_config_invalid = pyqtSignal(str)
     inspection_recalculate_requested = pyqtSignal(object)
@@ -68,6 +69,7 @@ class InspectionPanel(QWidget):
         self._base_inspection_config = InspectionConfig()
         self._model_class_names = {0: "异物", 1: "脏污"}
         self._updating_config_ui = False
+        self._last_offline_image_path = ""
         self._circle_operation_busy = False
         self._recalculate_timer = QTimer(self)
         self._recalculate_timer.setSingleShot(True)
@@ -81,6 +83,7 @@ class InspectionPanel(QWidget):
 
         self.select_model_btn.clicked.connect(self._choose_model)
         self.load_model_btn.clicked.connect(self._request_model_load)
+        self.select_local_image_btn.clicked.connect(self._choose_offline_image)
         self.display_mode_combo.currentIndexChanged.connect(
             self._refresh_result_image
         )
@@ -162,6 +165,8 @@ class InspectionPanel(QWidget):
         toolbar.addWidget(self.show_masks_check)
         toolbar.addWidget(self.show_circle_check)
         toolbar.addWidget(self.show_rings_check)
+        self.select_local_image_btn = QPushButton("选择本地图片…")
+        toolbar.addWidget(self.select_local_image_btn)
         toolbar.addStretch(1)
         self.fit_image_btn = QPushButton("适应窗口")
         self.reset_view_btn = QPushButton("1:1")
@@ -541,6 +546,34 @@ class InspectionPanel(QWidget):
         if path:
             self.set_model_path(path)
 
+    def _choose_offline_image(self):
+        """选择一张本地图，并将路径和页面当前配置交给主窗口。"""
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择本地检测图片",
+            self._last_offline_image_path,
+            (
+                "图像文件 (*.jpg *.jpeg *.png *.bmp *.tif *.tiff);;"
+                "所有文件 (*.*)"
+            ),
+        )
+        if not path:
+            return
+
+        try:
+            config = self.build_inspection_config()
+        except ValueError as error:
+            self.inspection_config_invalid.emit(str(error))
+            return
+        errors = config.validate()
+        if errors:
+            self.inspection_config_invalid.emit(errors[0])
+            return
+
+        self._last_offline_image_path = path
+        self.offline_image_test_requested.emit(path, config)
+
     def _request_model_load(self):
         path = self.selected_model_path
         if path:
@@ -758,7 +791,7 @@ class InspectionPanel(QWidget):
         self.circle_redetection_requested.emit(config)
 
     def _request_circle_confirmation(self):
-        """请求确认评分最高的当前候选圆，不重新执行 Hough。"""
+        """请求确认评分最高的当前候选圆，不重新执行轮廓找圆。"""
 
         try:
             config = self.build_inspection_config()
@@ -1215,7 +1248,7 @@ class InspectionPanel(QWidget):
         self._populate_rule_table(rules, results)
 
     def _build_circle_group(self) -> QGroupBox:
-        group = QGroupBox("2. Hough 找圆")
+        group = QGroupBox("2. 轮廓找圆")
         layout = QFormLayout(group)
         self.min_radius_spin = QSpinBox()
         self.min_radius_spin.setRange(1, 100000)
@@ -1232,7 +1265,7 @@ class InspectionPanel(QWidget):
         self.circle_candidate_combo.addItem("尚无候选圆")
         self.circle_candidate_combo.setEnabled(False)
         self.circle_candidate_combo.setToolTip(
-            "展示本次 Hough 找到并用于生成 ROI 的产品圆"
+            "展示本次轮廓法找到并用于生成 ROI 的产品圆"
         )
         self.find_circle_btn = QPushButton("重新找圆")
         self.confirm_circle_btn = QPushButton("确认当前圆心")
@@ -1324,12 +1357,15 @@ class InspectionPanel(QWidget):
             button.setToolTip("当前为 GUI 框架预览，业务逻辑将在后续步骤接入")
 
         self.select_model_btn.setToolTip("选择一个 YOLO-Seg .pt 模型")
+        self.select_local_image_btn.setToolTip(
+            "选择一张本地图片，使用当前检测参数执行完整质检"
+        )
         self.load_model_btn.setEnabled(False)
         self.add_region_btn.setToolTip("在末尾增加一个连续圆环")
         self.remove_region_btn.setToolTip("删除选中圆环，未选择时删除最后一行")
         self.find_circle_btn.setEnabled(False)
         self.find_circle_btn.setToolTip(
-            "按当前参数重新执行 Hough，并对新的 ROI 重新推理"
+            "按当前参数重新执行轮廓找圆，并对新的 ROI 重新推理"
         )
         self.confirm_circle_btn.setEnabled(False)
         self.confirm_circle_btn.setToolTip(

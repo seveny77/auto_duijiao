@@ -4,6 +4,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -91,6 +92,50 @@ class InspectionPanelConfigTest(unittest.TestCase):
         self.assertEqual(rebuilt.circle.min_radius_px, 900)
         self.assertAlmostEqual(rebuilt.region_rules[0].min_confidence, 0.55)
         self.assertEqual(rebuilt.region_rules[0].max_instance_count, 3)
+
+    @patch(
+        "gui.app.widgets.inspection_panel.QFileDialog.getOpenFileName",
+        return_value=(r"C:\测试图片\端面.png", ""),
+    )
+    def test_offline_image_request_contains_path_and_current_config(
+        self,
+        _dialog,
+    ):
+        self.panel.set_inspection_config(_valid_config())
+        self.panel.min_radius_spin.setValue(900)
+        requests = []
+        self.panel.offline_image_test_requested.connect(
+            lambda path, config: requests.append((path, config))
+        )
+
+        self.panel._choose_offline_image()
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0][0], r"C:\测试图片\端面.png")
+        self.assertEqual(requests[0][1].circle.min_radius_px, 900)
+        self.assertEqual(
+            self.panel._last_offline_image_path,
+            r"C:\测试图片\端面.png",
+        )
+
+    def test_invalid_config_does_not_submit_offline_image(self):
+        config = _valid_config()
+        config.mm_per_pixel = 0.0
+        self.panel.set_inspection_config(config)
+        requests = []
+        errors = []
+        self.panel.offline_image_test_requested.connect(
+            lambda path, value: requests.append((path, value))
+        )
+        self.panel.inspection_config_invalid.connect(errors.append)
+        with patch(
+            "gui.app.widgets.inspection_panel.QFileDialog.getOpenFileName",
+            return_value=(r"C:\test.png", ""),
+        ):
+            self.panel._choose_offline_image()
+
+        self.assertEqual(requests, [])
+        self.assertTrue(errors)
 
     def test_add_and_remove_region_rebuild_rules(self):
         self.panel.set_inspection_config(_valid_config())

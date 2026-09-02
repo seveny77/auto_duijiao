@@ -95,6 +95,24 @@ class PrepareSegmentationDatasetTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "未配置类别"):
                 prepare_dataset(source, root / "new_output")
 
+    def test_missing_annotation_is_written_as_empty_negative_label(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self._create_source(root, count=3)
+            (source / "label" / "image_01.json").unlink()
+
+            output = root / "converted"
+            summary = prepare_dataset(source, output, seed=7)
+
+            self.assertEqual(summary["unannotated_image_count"], 1)
+            manifest = json.loads(
+                (output / "split_manifest.json").read_text(encoding="utf-8")
+            )
+            split = manifest["assignments"]["image_01"]
+            empty_label = output / "labels" / split / "image_01.txt"
+            self.assertTrue(empty_label.is_file())
+            self.assertEqual(empty_label.read_text(encoding="utf-8"), "")
+
 
 if __name__ == "__main__":
     unittest.main()

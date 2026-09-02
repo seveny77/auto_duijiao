@@ -417,7 +417,7 @@ class InspectionServiceTest(unittest.TestCase):
             )],
             0,
             False,
-            ["预期检测到 2 个圆，Hough 去重后检测到 1 个"],
+            ["预期检测到 2 个圆，轮廓去重后检测到 1 个"],
         )
         results = []
         compatibility_results = []

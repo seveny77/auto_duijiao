@@ -5,7 +5,7 @@ import copy
 
 from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
 
-from backend.circle_detection import HoughCircleDetector
+from backend.circle_detection import ContourCircleDetector
 from backend.inspection_engine import InspectionRuleEngine
 from backend.inspection_types import InspectionResult
 from backend.segmentation_model_service import SegmentationModelService
@@ -69,7 +69,7 @@ class InspectionService(QObject):
         self._thread = QThread(self)
         self._worker = InspectionWorker(
             segmentation_service or SegmentationModelService(),
-            circle_detector or HoughCircleDetector(),
+            circle_detector or ContourCircleDetector(),
             rule_engine or InspectionRuleEngine(),
         )
         self._worker.moveToThread(self._thread)
@@ -204,7 +204,7 @@ class InspectionService(QObject):
         source_result: InspectionResult,
         config,
     ) -> bool:
-        """后台重跑当前图 Hough，并按新圆心重新裁切 ROI 和推理。"""
+        """后台重跑当前图轮廓找圆，并按新圆心重新裁切 ROI 和推理。"""
 
         if self._shutting_down or self._state != InspectionState.READY:
             return False
