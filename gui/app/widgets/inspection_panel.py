@@ -6,6 +6,8 @@
 """
 
 import copy
+from datetime import datetime
+from pathlib import Path
 
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QColor
@@ -25,6 +27,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -58,6 +61,8 @@ class InspectionPanel(QWidget):
     inspection_recalculate_requested = pyqtSignal(object)
     circle_redetection_requested = pyqtSignal(object)
     circle_confirmation_requested = pyqtSignal(object)
+    original_image_saved = pyqtSignal(str)
+    original_image_save_failed = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -194,6 +199,10 @@ class InspectionPanel(QWidget):
         self._image_view = ZoomableGraphicsView(self._image_scene)
         self._image_view.setAlignment(Qt.AlignCenter)
         self._image_view.setStyleSheet("background-color: #171a20;")
+        self._image_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._image_view.customContextMenuRequested.connect(
+            self._show_original_image_context_menu
+        )
         self._image_view.hide()
         frame_layout.addWidget(self._image_view)
         image_layout.addWidget(self.image_frame, 1)
@@ -1197,6 +1206,59 @@ class InspectionPanel(QWidget):
             return
         self._image_view.resetTransform()
         self._image_view._zoom_steps = 0
+
+    def _show_original_image_context_menu(self, position):
+        """在检测图像上提供原始最终图保存入口。"""
+
+        if self._original_image is None:
+            return
+        menu = QMenu(self)
+        save_action = menu.addAction("保存原始最终图…")
+        selected_action = menu.exec_(self._image_view.mapToGlobal(position))
+        if selected_action is save_action:
+            self._save_original_image()
+
+    def _save_original_image(self):
+        """以最高质量 JPEG 保存未绘制的原始最终图。"""
+
+        if self._original_image is None:
+            return
+
+        default_name = datetime.now().strftime("final_image_%Y%m%d_%H%M%S.jpg")
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "保存原始最终图",
+            default_name,
+            "JPEG 图像 (*.jpg *.jpeg)",
+        )
+        if not path:
+            return
+
+        output_path = Path(path)
+        if not output_path.suffix:
+            output_path = output_path.with_suffix(".jpg")
+        if output_path.suffix.lower() not in {".jpg", ".jpeg"}:
+            self.original_image_save_failed.emit(
+                "原始最终图仅支持保存为 JPG/JPEG"
+            )
+            return
+
+        try:
+            # imencode + tofile 能正确处理 Windows 中文路径；质量 100 为
+            # OpenCV JPEG 可设置的最高质量。_original_image 未经过叠加绘制。
+            import cv2
+
+            succeeded, encoded = cv2.imencode(
+                ".jpg",
+                self._original_image,
+                [cv2.IMWRITE_JPEG_QUALITY, 100],
+            )
+            if not succeeded:
+                raise RuntimeError("JPEG 编码失败")
+            encoded.tofile(str(output_path))
+            self.original_image_saved.emit(str(output_path))
+        except (OSError, RuntimeError, ValueError) as error:
+            self.original_image_save_failed.emit(str(error))
 
     def _update_result_summary(self, task_id: str, result):
         status_value = getattr(getattr(result, "status", None), "value", "")

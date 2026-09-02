@@ -3,9 +3,11 @@
 
 import os
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
+import cv2
 import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -422,6 +424,26 @@ class InspectionPanelConfigTest(unittest.TestCase):
         self.panel.circle_result_table.selectRow(0)
         self.app.processEvents()
         self.assertEqual(self.panel.rule_table.item(0, 2).text(), "0.88")
+
+    def test_save_original_image_writes_high_quality_jpeg(self):
+        original = np.zeros((12, 15, 3), dtype=np.uint8)
+        original[:, :, 1] = 120
+        self.panel._original_image = original
+        saved = []
+        self.panel.original_image_saved.connect(saved.append)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = os.path.join(directory, "original.jpg")
+            with patch(
+                "gui.app.widgets.inspection_panel.QFileDialog.getSaveFileName",
+                return_value=(output_path, "JPEG 图像 (*.jpg *.jpeg)"),
+            ):
+                self.panel._save_original_image()
+
+            restored = cv2.imread(output_path, cv2.IMREAD_COLOR)
+            self.assertIsNotNone(restored)
+            self.assertEqual(restored.shape, original.shape)
+            self.assertEqual(saved, [output_path])
 
 
 if __name__ == "__main__":

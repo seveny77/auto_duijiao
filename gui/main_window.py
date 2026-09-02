@@ -205,6 +205,12 @@ class MainWindow(QMainWindow):
         self.inspection_panel.inspection_config_invalid.connect(
             lambda message: self._log(f"[检测] 配置输入错误: {message}")
         )
+        self.inspection_panel.original_image_saved.connect(
+            lambda path: self._log(f"[检测] 原始最终图已保存: {path}")
+        )
+        self.inspection_panel.original_image_save_failed.connect(
+            lambda message: self._log(f"[检测] 原始最终图保存失败: {message}")
+        )
         self.inspection_panel.inspection_recalculate_requested.connect(
             self._on_inspection_recalculate
         )
