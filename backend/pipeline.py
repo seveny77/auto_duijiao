@@ -548,7 +548,7 @@ def run_search(cfg) -> int:
             else:
                 t0 = time.perf_counter()
                 set_full_frame(cam, cfg.fine_binning)
-                cam.set_roi(*roi)
+                #cam.set_roi(*roi)
                 cam.set_exposure(cfg.exposure_us)
                 ct["fine_switch_ms"] = perf.record(
                     "fine_switch_ms",
