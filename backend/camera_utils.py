@@ -13,51 +13,21 @@ logger = logging.getLogger(__name__)
 class RoiAlignmentError(ValueError):
     """ROI 对齐或边界校验失败。"""
 
-def resolve_sensor_size(cam) -> Tuple[int, int]:
-    """优先读取相机尺寸，读取失败时使用默认兜底值。"""
+def resolve_sensor_size(cam=None) -> Tuple[int, int]:
+    """返回项目配置的固定相机工作分辨率。
 
-    getter = getattr(
-        cam,
-        "get_sensor_size",
-        None,
-    )
+    ``cam`` 参数仅为兼容现有调用点而保留。对焦流程不能使用
+    ``WidthMax`` 作为工作画面尺寸：它是相机允许的最大值，可能与 MVS
+    中实际设定的 Width 不一致，从而生成相机不接受的 ROI。
+    """
 
-    # 仿真相机或测试FakeCam可能没有get_sensor_size()。
-    if not callable(getter):
-        logger.info(
-            "相机对象不支持尺寸读取，使用默认值: %dx%d",
-            SENSOR_W,
-            SENSOR_H,
-        )
-        return SENSOR_W, SENSOR_H
-
-    try:
-        width, height = getter()
-
-        width = int(width)
-        height = int(height)
-
-        if width <= 0 or height <= 0:
-            raise ValueError(
-                f"相机返回了无效尺寸: {width}x{height}"
-            )
-
-    except Exception as error:
-        logger.warning(
-            "读取相机尺寸失败，使用默认值: %dx%d，原因: %s",
-            SENSOR_W,
-            SENSOR_H,
-            error,
-        )
-        return SENSOR_W, SENSOR_H
-
+    del cam
     logger.info(
-        "使用相机自动尺寸: %dx%d",
-        width,
-        height,
+        "使用 constants.py 配置的相机尺寸: %dx%d",
+        SENSOR_W,
+        SENSOR_H,
     )
-
-    return width, height
+    return SENSOR_W, SENSOR_H
 
 def align_window(
     roi: Tuple[int, int, int, int],
