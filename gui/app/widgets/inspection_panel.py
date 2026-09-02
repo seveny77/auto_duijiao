@@ -823,16 +823,31 @@ class InspectionPanel(QWidget):
         self._update_circle_controls(self._inspection_result)
 
     def _schedule_recalculation(self, _value=None):
-        """合并连续编辑；没有检测结果时不产生复判请求。"""
+        """先保存当前表格值，再合并连续编辑请求。"""
 
-        if self._updating_config_ui or self._inspection_result is None:
+        if self._updating_config_ui:
+            return
+
+        # 规则表编辑后立即更新面板内存配置。否则切换多端面时，
+        # _update_rule_results() 会按旧配置重建表格，导致刚输入的阈值丢失。
+        # 这里的规则仍然只有一份，按区域×类别作用于所有端面。
+        if not self._sync_rule_config_from_table():
+            return
+
+        if (
+            self._inspection_result is None
+            and self._image_inspection_result is None
+        ):
             return
         self._recalculate_timer.start()
 
     def _emit_recalculation_request(self):
         """界面值完整且通过校验时，提交当前图轻量复判请求。"""
 
-        if self._inspection_result is None:
+        if (
+            self._inspection_result is None
+            and self._image_inspection_result is None
+        ):
             return
         try:
             config = self.build_inspection_config()
@@ -877,11 +892,29 @@ class InspectionPanel(QWidget):
 
         if not isinstance(result, ImageInspectionResult):
             raise TypeError("result 必须是 ImageInspectionResult")
+        # 结果可能在配置页尚未初始化时先到达；先用结果携带的区域定义
+        # 对齐规则表，避免后续端面切换按默认 region_1/region_2 重建。
+        config_region_ids = {
+            str(rule.region_id) for rule in getattr(config, "region_rules", [])
+        }
+        table_region_ids = {
+            str(self.region_table.item(row, 0).data(Qt.UserRole))
+            for row in range(self.region_table.rowCount())
+            if self.region_table.item(row, 0) is not None
+        }
+        if config_region_ids and config_region_ids != table_region_ids:
+            self.set_inspection_config(config)
         self._original_image = original_image
         self._inspection_result = None
         self._image_inspection_result = result
         self._selected_circle_result = None
         self._inspection_config = config
+        self._base_inspection_config = copy.deepcopy(config)
+        if not self._model_class_names:
+            self._model_class_names = {
+                int(rule.class_id): str(rule.class_name)
+                for rule in getattr(config, "region_rules", [])
+            }
         self.image_placeholder.hide()
         self._image_view.show()
         self.fit_image_btn.setEnabled(True)
@@ -986,6 +1019,9 @@ class InspectionPanel(QWidget):
     def _on_circle_result_selection_changed(self):
         """只刷新右侧详情和规则统计，不改动左侧叠加图。"""
 
+        # 编辑后立即切换端面时，延迟复判定定时器可能尚未触发；
+        # 切换前先同步，避免按旧配置重建规则表。
+        self._sync_rule_config_from_table()
         result = self._image_inspection_result
         if result is None:
             return
@@ -1002,6 +1038,40 @@ class InspectionPanel(QWidget):
             _circle_result_detail(circle_result)
         )
         self._update_rule_results(circle_result, self._inspection_config)
+
+    def _sync_rule_config_from_table(self) -> bool:
+        """将规则表当前值同步到面板内存配置，返回是否成功。"""
+
+        # 结果展示可能先于配置表初始化（例如历史/测试结果恢复）；
+        # 此时不能用空的区域表重建规则。
+        if self.region_table.rowCount() <= 0:
+            return False
+
+        # 某些结果恢复场景可能尚未经过模型加载回调；此时仍可从已保存
+        # 的规则中恢复类别集合，避免 build_inspection_config() 生成空规则。
+        base_config = self._base_inspection_config
+        if (
+            not getattr(base_config, "region_rules", None)
+            and getattr(self._inspection_config, "region_rules", None)
+        ):
+            base_config = self._inspection_config
+            self._base_inspection_config = copy.deepcopy(base_config)
+        if not self._model_class_names:
+            self._model_class_names = {
+                int(rule.class_id): str(rule.class_name)
+                for rule in getattr(
+                    base_config,
+                    "region_rules",
+                    [],
+                )
+            }
+        try:
+            config = self.build_inspection_config()
+        except ValueError:
+            return False
+        self._inspection_config = config
+        self._base_inspection_config = copy.deepcopy(config)
+        return True
 
     def _update_image_circle_controls(self, result: ImageInspectionResult):
         """设置多端面找圆控件；端面人工确认留到后续步骤。"""

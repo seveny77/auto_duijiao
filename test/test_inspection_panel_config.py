@@ -391,6 +391,38 @@ class InspectionPanelConfigTest(unittest.TestCase):
             pixmap_key,
         )
 
+    def test_multi_circle_rule_edit_is_shared_after_switching_face(self):
+        config = _valid_config()
+        config.circle.expected_circle_count = 2
+        result = ImageInspectionResult(
+            image_id="inspection-000003",
+            image_width=100,
+            image_height=60,
+            expected_circle_count=2,
+            detected_circle_count=2,
+            completed_circle_count=2,
+            is_complete=True,
+            circle_results=[
+                CircleInspectionResult(circle_id="circle-001", completed=True),
+                CircleInspectionResult(circle_id="circle-002", completed=True),
+            ],
+        )
+        self.panel.present_image_inspection_result(
+            result.image_id,
+            np.zeros((60, 100, 3), dtype=np.uint8),
+            result,
+            config,
+        )
+
+        # 编辑区域规则后切换到另一个端面，再切回时，阈值应保持一致。
+        self.panel.rule_table.item(0, 2).setText("0.88")
+        self.panel.circle_result_table.selectRow(1)
+        self.app.processEvents()
+        self.assertEqual(self.panel.rule_table.item(0, 2).text(), "0.88")
+        self.panel.circle_result_table.selectRow(0)
+        self.app.processEvents()
+        self.assertEqual(self.panel.rule_table.item(0, 2).text(), "0.88")
+
 
 if __name__ == "__main__":
     unittest.main()
