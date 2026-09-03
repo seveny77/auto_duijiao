@@ -44,7 +44,7 @@ class CtLogger:
             ("final_ms",),
             (
                 ("停精扫流", "fine_stop_ms"),
-                ("恢复全幅", "final_switch_ms"),
+                ("恢复初始工作窗口", "final_switch_ms"),
                 ("采集", "final_collector_start_ms"),
                 ("单点运动", "single_capture_ms"),
                 ("等帧", "final_frame_wait_ms"),
@@ -91,7 +91,7 @@ class CtLogger:
         "fine_frame_wait_ms": "帧等待",
         "fine_stabilize_ms": "稳定确认",
         "fine_stop_ms": "停止取流",
-        "final_switch_ms": "恢复全幅",
+        "final_switch_ms": "恢复初始工作窗口",
         "final_collector_start_ms": "采集启动",
         "single_capture_ms": "单点运动",
         "final_frame_wait_ms": "最终帧等待",

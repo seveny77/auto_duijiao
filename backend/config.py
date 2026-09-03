@@ -53,6 +53,11 @@ class FocusConfig:
     coarse_binning: int = 4
     coarse_downsample: str = "decimation"
     fine_binning: int = 1
+    # 标定、粗扫、精扫、最终成像共用的初始工作窗口。
+    # 单位为未降采样的传感器像素；宽高同时为 0 表示使用全幅。
+    # 第一版固定在传感器中心，不单独配置 OffsetX/OffsetY。
+    work_roi_width_px: int = 0
+    work_roi_height_px: int = 0
     detect_model: str = "assets/models/yolo/best.pt"
     detect_conf: float = 0.5
     roi_fallback_size: int = 700

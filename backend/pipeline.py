@@ -20,6 +20,7 @@ from adapters.evaluator_opencv import (
 from backend.camera_utils import (
     fallback_roi,
     frame_positions,
+    resolve_work_roi,
     set_coarse_frame,
     set_full_frame,
 )
@@ -381,6 +382,8 @@ def run_search(cfg) -> int:
                 cam,
                 cfg.coarse_downsample,
                 cfg.coarse_binning,
+                cfg.work_roi_width_px,
+                cfg.work_roi_height_px,
             )
             ct["camera_setup_ms"] = perf.record(
                 "camera_setup_ms",
@@ -404,6 +407,19 @@ def run_search(cfg) -> int:
                     )
 
         # ── ② 策略预测 ──
+        if sensor_size is None:
+            work_roi = resolve_work_roi(
+                cfg.work_roi_width_px,
+                cfg.work_roi_height_px,
+            )
+        else:
+            work_roi = resolve_work_roi(
+                cfg.work_roi_width_px,
+                cfg.work_roi_height_px,
+                sensor_size=sensor_size,
+            )
+        work_frame_size = (work_roi[2], work_roi[3])
+
         ctx = SearchContext(
             cam=cam,
             motion=motion,
@@ -453,7 +469,7 @@ def run_search(cfg) -> int:
         if sim:
             roi = fallback_roi(
                 cfg.roi_fallback_size,
-                sensor_size=sensor_size,
+                sensor_size=work_frame_size,
             )
             roi_src = "fallback(sim)"
             detect_box = None
@@ -470,7 +486,7 @@ def run_search(cfg) -> int:
                 cfg.coarse_binning,
                 cfg.roi_fallback_size,
                 model=cfg.detect_model_obj,
-                sensor_size=sensor_size,
+                sensor_size=work_frame_size,
             )
             ct["yolo_ms"] = perf.record(
                 "yolo_ms",
@@ -503,8 +519,12 @@ def run_search(cfg) -> int:
             final_position_um = int(round(predicted_peak_um))
             if not sim:
                 t0 = time.perf_counter()
-                set_full_frame(cam, 1)
-                cam.set_roi(*roi)
+                set_full_frame(
+                    cam,
+                    1,
+                    cfg.work_roi_width_px,
+                    cfg.work_roi_height_px,
+                )
                 cam.set_exposure(cfg.exposure_us)
                 ct["fine_switch_ms"] = perf.record(
                     "fine_switch_ms",
@@ -538,7 +558,8 @@ def run_search(cfg) -> int:
                 hi = min(predicted_peak_um + half, search_end)
             n_fine = (hi - lo) // fine_step
 
-            # 切换：停流 → 开窗（sim 换成精扫专用假组件）。
+            # 切换：停流 → 恢复 1×1 初始工作窗口。
+            # sim 使用精扫专用假组件。
             if sim:
                 motion = FakeMotionBackend(lo, lo + n_fine * fine_step)
                 cam = SimCamera(n=n_fine, interval_s=0.001)
@@ -547,8 +568,12 @@ def run_search(cfg) -> int:
                 )
             else:
                 t0 = time.perf_counter()
-                set_full_frame(cam, cfg.fine_binning)
-                cam.set_roi(*roi)
+                set_full_frame(
+                    cam,
+                    cfg.fine_binning,
+                    cfg.work_roi_width_px,
+                    cfg.work_roi_height_px,
+                )
                 cam.set_exposure(cfg.exposure_us)
                 ct["fine_switch_ms"] = perf.record(
                     "fine_switch_ms",
@@ -626,7 +651,12 @@ def run_search(cfg) -> int:
             )
         if not sim:
             final_switch_t0 = time.perf_counter()
-            set_full_frame(cam, 1)
+            set_full_frame(
+                cam,
+                1,
+                cfg.work_roi_width_px,
+                cfg.work_roi_height_px,
+            )
             ct["final_switch_ms"] = perf.record(
                 "final_switch_ms",
                 (
@@ -993,7 +1023,9 @@ def run_calibrate(cfg) -> int:
             cam.set_gain(cfg.gain_db)
             set_coarse_frame(cam,
                              cfg.calibrate_downsample or cfg.coarse_downsample,
-                             cfg.calibrate_factor or cfg.coarse_binning)
+                             cfg.calibrate_factor or cfg.coarse_binning,
+                             cfg.work_roi_width_px,
+                             cfg.work_roi_height_px)
             ct["camera_setup_ms"] = (time.perf_counter() - t0) * 1000
 
             if not cfg.yes:

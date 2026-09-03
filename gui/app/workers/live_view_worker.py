@@ -157,6 +157,14 @@ class LiveViewWorker(QObject):
                 cam,
                 mode="decimation",
                 factor=factor,
+                work_width_px=self._cam_params.get(
+                    "work_roi_width_px",
+                    0,
+                ),
+                work_height_px=self._cam_params.get(
+                    "work_roi_height_px",
+                    0,
+                ),
             )
 
             # 实时预览使用自由运行模式：

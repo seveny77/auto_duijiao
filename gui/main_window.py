@@ -852,6 +852,12 @@ class MainWindow(QMainWindow):
             "exposure_us": self.param_panel.exposure_spin.value(),
             "gain_db": self.param_panel.gain_spin.value(),
             "dec": dec_map[self.param_panel.decimation_combo.currentText()],
+            "work_roi_width_px": (
+                self.param_panel.work_roi_width_spin.value()
+            ),
+            "work_roi_height_px": (
+                self.param_panel.work_roi_height_spin.value()
+            ),
         }
 
         self.live_view_service.toggle(source, camera_params)

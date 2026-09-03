@@ -13,6 +13,11 @@ logger = logging.getLogger(__name__)
 class RoiAlignmentError(ValueError):
     """ROI 对齐或边界校验失败。"""
 
+
+# 5120 能被 32 整除；工作窗口宽高按 32 对齐后，在 2×2、4×4
+# 降采样下仍能得到整数且至少 4 像素对齐的尺寸和居中偏移。
+WORK_ROI_ALIGNMENT = 32
+
 def resolve_sensor_size(cam=None) -> Tuple[int, int]:
     """返回项目配置的固定相机工作分辨率。
 
@@ -28,6 +33,95 @@ def resolve_sensor_size(cam=None) -> Tuple[int, int]:
         SENSOR_H,
     )
     return SENSOR_W, SENSOR_H
+
+
+def resolve_work_roi(
+    work_width_px: int = 0,
+    work_height_px: int = 0,
+    sensor_size: Tuple[int, int] = (SENSOR_W, SENSOR_H),
+) -> Tuple[int, int, int, int]:
+    """返回全分辨率坐标系中的居中初始工作窗口。
+
+    宽高同时为 0 表示全幅。非零尺寸按 32 像素向下对齐，使同一物理
+    窗口可以安全换算到 1×1、2×2 和 4×4 采样阶段。
+    """
+
+    sensor_width, sensor_height = map(int, sensor_size)
+    width = int(work_width_px)
+    height = int(work_height_px)
+
+    if width == 0 and height == 0:
+        return 0, 0, sensor_width, sensor_height
+    if width <= 0 or height <= 0:
+        raise RoiAlignmentError(
+            "初始工作窗口宽高必须同时为 0（全幅），或同时大于 0: "
+            f"width={width}, height={height}"
+        )
+
+    aligned_width = width - width % WORK_ROI_ALIGNMENT
+    aligned_height = height - height % WORK_ROI_ALIGNMENT
+    if aligned_width != width or aligned_height != height:
+        logger.warning(
+            "初始工作窗口需 %d 对齐: %dx%d -> %dx%d",
+            WORK_ROI_ALIGNMENT,
+            width,
+            height,
+            aligned_width,
+            aligned_height,
+        )
+        width = aligned_width
+        height = aligned_height
+
+    if width < WORK_ROI_ALIGNMENT or height < WORK_ROI_ALIGNMENT:
+        raise RoiAlignmentError(
+            "初始工作窗口对齐后过小: "
+            f"{width}x{height}"
+        )
+    if width > sensor_width or height > sensor_height:
+        raise RoiAlignmentError(
+            "初始工作窗口超出传感器: "
+            f"{width}x{height} > {sensor_width}x{sensor_height}"
+        )
+
+    x = (sensor_width - width) // 2
+    y = (sensor_height - height) // 2
+    return x, y, width, height
+
+
+def _phase_work_roi(
+    sensor_size: Tuple[int, int],
+    work_width_px: int,
+    work_height_px: int,
+    factor: int,
+) -> Tuple[int, int, int, int]:
+    """把全分辨率初始窗口换算到当前采样倍率的相机坐标系。"""
+
+    if factor <= 0:
+        raise RoiAlignmentError(
+            f"采样倍率必须大于 0: {factor}"
+        )
+
+    sensor_width, sensor_height = sensor_size
+    base_x, base_y, base_width, base_height = resolve_work_roi(
+        work_width_px,
+        work_height_px,
+        sensor_size=sensor_size,
+    )
+    phase_sensor = (
+        sensor_width // factor,
+        sensor_height // factor,
+    )
+    phase_roi = (
+        base_x // factor,
+        base_y // factor,
+        base_width // factor,
+        base_height // factor,
+    )
+    return align_window(
+        phase_roi,
+        sensor_size=phase_sensor,
+        inc=4,
+    )
 
 def align_window(
     roi: Tuple[int, int, int, int],
@@ -108,8 +202,10 @@ def align_window(
 def set_full_frame(
     cam,
     binning: int,
+    work_width_px: int = 0,
+    work_height_px: int = 0,
 ) -> Tuple[int, int]:
-    """设置目标 Binning 下的全幅图像，并返回传感器尺寸。"""
+    """设置目标 Binning 下的初始工作窗口，并返回传感器尺寸。"""
 
     # 相机可能记住上一次运行的采样设置。
     # 先恢复到1×1，才能读取原始传感器尺寸。
@@ -134,14 +230,18 @@ def set_full_frame(
         binning,
     )
 
-    width = (sensor_width // binning) // 4 * 4
-    height = (sensor_height // binning) // 4 * 4
+    roi = _phase_work_roi(
+        (sensor_width, sensor_height),
+        work_width_px,
+        work_height_px,
+        binning,
+    )
 
-    cam.set_roi(
-        0,
-        0,
-        width,
-        height,
+    cam.set_roi(*roi)
+    logger.info(
+        "当前阶段使用初始工作窗口: (%d,%d) %dx%d，采样倍率=%d",
+        *roi,
+        binning,
     )
 
     return sensor_width, sensor_height
@@ -151,8 +251,10 @@ def set_coarse_frame(
     cam,
     mode: str,
     factor: int,
+    work_width_px: int = 0,
+    work_height_px: int = 0,
 ) -> Tuple[int, int]:
-    """设置粗扫降采样，并返回原始传感器尺寸。"""
+    """在初始工作窗口基础上设置粗扫降采样。"""
 
     cam.set_binning(1, 1)
     cam.set_decimation(1, 1)
@@ -177,14 +279,19 @@ def set_coarse_frame(
             factor,
         )
 
-    width = (sensor_width // factor) // 4 * 4
-    height = (sensor_height // factor) // 4 * 4
+    roi = _phase_work_roi(
+        (sensor_width, sensor_height),
+        work_width_px,
+        work_height_px,
+        factor,
+    )
 
-    cam.set_roi(
-        0,
-        0,
-        width,
-        height,
+    cam.set_roi(*roi)
+    logger.info(
+        "粗扫使用初始工作窗口: (%d,%d) %dx%d，%s=%d",
+        *roi,
+        mode,
+        factor,
     )
 
     return sensor_width, sensor_height

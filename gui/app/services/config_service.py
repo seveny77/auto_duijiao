@@ -97,6 +97,8 @@ class ConfigService:
             "exposure_us": self._panel.exposure_spin.value(),
             "gain_db": self._panel.gain_spin.value(),
             "decimation": self._panel.decimation_combo.currentText(),
+            "work_roi_width_px": self._panel.work_roi_width_spin.value(),
+            "work_roi_height_px": self._panel.work_roi_height_spin.value(),
             # 轴卡和E4O4的SDK路径属于工控机本地配置，
             # 不在主界面上占用大量编辑控件。
             "motion": self._motion_values(),
@@ -194,6 +196,12 @@ class ConfigService:
             self._panel.decimation_combo.currentText()
         ]
         cfg.coarse_downsample = "decimation"
+        cfg.work_roi_width_px = (
+            self._panel.work_roi_width_spin.value()
+        )
+        cfg.work_roi_height_px = (
+            self._panel.work_roi_height_spin.value()
+        )
         cfg.coarse_step_um = (
             self._panel.coarse_step_spin.value()
         )
@@ -307,6 +315,12 @@ class ConfigService:
         )
         self._panel.decimation_combo.setCurrentText(
             cfg.get("decimation", "2x2")
+        )
+        self._panel.work_roi_width_spin.setValue(
+            cfg.get("work_roi_width_px", 0)
+        )
+        self._panel.work_roi_height_spin.setValue(
+            cfg.get("work_roi_height_px", 0)
         )
         self._panel.search_start_spin.setValue(
             cfg.get("search_start_um", 9500)

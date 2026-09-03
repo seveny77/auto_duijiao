@@ -197,7 +197,7 @@ class ResultPresenter:
         self._status_fn("搜索完成，已保持在最终清晰位置")
 
     def _show_final_image(self, result):
-        """在定拍全幅图上绘制 ROI 后显示。"""
+        """在初始工作窗口定拍图上绘制局部 ROI 后显示。"""
 
         x, y, w, h = result.roi
 
@@ -223,7 +223,7 @@ class ResultPresenter:
 
         self._show_image(
             annotated,
-            "定拍全幅帧（ROI 已标注）",
+            "初始工作窗口定拍帧（ROI 已标注）",
         )
 
     def _present_calibrate(self, result):

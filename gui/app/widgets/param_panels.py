@@ -4,6 +4,8 @@ from PyQt5.QtWidgets import (
     QPushButton, QCheckBox, QHBoxLayout,QTabWidget,
 )
 
+from backend.constants import SENSOR_H, SENSOR_W
+
 class ParamPanel(QWidget):
     """左侧参数面板：创建并持有所有参数控件。"""
 
@@ -138,6 +140,22 @@ class ParamPanel(QWidget):
         )
         self.decimation_combo = QComboBox()
         self.decimation_combo.addItems(["1x1", "2x2", "4x4"])
+        self.work_roi_width_spin = QSpinBox()
+        self.work_roi_width_spin.setRange(0, SENSOR_W)
+        self.work_roi_width_spin.setSingleStep(32)
+        self.work_roi_width_spin.setSpecialValueText("全幅")
+        self.work_roi_width_spin.setToolTip(
+            "标定、粗扫、精扫和最终成像共用；"
+            "单位为未降采样的传感器像素，0 表示全幅"
+        )
+        self.work_roi_height_spin = QSpinBox()
+        self.work_roi_height_spin.setRange(0, SENSOR_H)
+        self.work_roi_height_spin.setSingleStep(32)
+        self.work_roi_height_spin.setSpecialValueText("全幅")
+        self.work_roi_height_spin.setToolTip(
+            "标定、粗扫、精扫和最终成像共用；"
+            "单位为未降采样的传感器像素，0 表示全幅"
+        )
         self.camera_connect_btn = QPushButton("连接相机")
         self.camera_connect_btn.setToolTip(
             "手动连接/断开相机；连接后句柄常驻，"
@@ -151,6 +169,8 @@ class ParamPanel(QWidget):
         form.addRow("曝光时间:", self.exposure_spin)
         form.addRow("增益:", self.gain_spin)
         form.addRow("下采样(dec):", self.decimation_combo)
+        form.addRow("初始开窗宽度:", self.work_roi_width_spin)
+        form.addRow("初始开窗高度:", self.work_roi_height_spin)
         form.addRow("连接状态:", self.camera_connection_label)
         form.addRow(self.camera_connect_btn)
         return group
@@ -456,6 +476,8 @@ class ParamPanel(QWidget):
             self.exposure_spin,
             self.gain_spin,
             self.decimation_combo,
+            self.work_roi_width_spin,
+            self.work_roi_height_spin,
             self.motion_connect_btn,
             self.camera_connect_btn,
             self.motion_reset_btn,
