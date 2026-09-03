@@ -167,6 +167,20 @@ class ResultPresenter:
     def _present_search(self, result):
         """展示搜索对焦结果。"""
 
+        if result.quality == "continuous_best_frame":
+            self._message_fn(
+                f"连续精扫完成：最佳帧 index={result.fine_best}，"
+                f"已回到起始位置 {result.final_position_um:g}µm"
+            )
+            self._ct_logger.log(result.ct_ms)
+            if result.final_image is not None:
+                self._show_image(
+                    result.final_image,
+                    f"连续精扫最佳帧 index={result.fine_best}",
+                )
+            self._status_fn("连续精扫完成，已回到扫描起点")
+            return
+
         self._message_fn(
             f"预测峰={result.predicted_peak_um}µm  "
             f"quality={result.quality}  "

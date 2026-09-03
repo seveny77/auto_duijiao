@@ -12,6 +12,11 @@ import threading
 from PyQt5.QtCore import QObject, Qt, pyqtSignal
 
 from gui.app.workers.camera_connect_worker import CameraConnectWorker
+from backend.camera_utils import (
+    resolve_sensor_size,
+    resolve_work_roi,
+    set_coarse_frame,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -28,17 +33,23 @@ class CameraService(QObject):
         connect_btn,
         status_fn,
         connection_label=None,
+        roi_status_label=None,
     ):
         super().__init__()
         self._connect_btn = connect_btn
         self._status_fn = status_fn
         self._connection_label = connection_label
+        self._roi_status_label = roi_status_label
 
         self._camera = None
         self._camera_index = 0
         self._connect_worker = None
         self._connect_thread = None
         self._shutdown_requested = threading.Event()
+        self._hardware_roi = None
+        self._hardware_roi_base = None
+        self._hardware_roi_applied = False
+        self._hardware_roi_decimation = None
         self._apply_connected_state(False)
 
     @property
@@ -61,6 +72,88 @@ class CameraService(QObject):
             self._connect_thread is not None
             and self._connect_thread.is_alive()
         )
+
+    @property
+    def hardware_roi(self):
+        """相机当前实际生效的 ROI（当前采样坐标系）。"""
+
+        return self._hardware_roi
+
+    @property
+    def hardware_roi_base(self):
+        """用户配置的全分辨率居中 ROI。"""
+
+        return self._hardware_roi_base
+
+    @property
+    def is_hardware_roi_applied(self) -> bool:
+        return self._hardware_roi_applied and self.is_connected
+
+    @property
+    def hardware_roi_decimation(self):
+        return self._hardware_roi_decimation
+
+    def is_hardware_roi_current(self, width: int, height: int, decimation: int):
+        """判断 GUI 当前参数是否仍对应已应用的硬件 ROI。"""
+
+        if not self.is_hardware_roi_applied:
+            return False
+        try:
+            expected_base = resolve_work_roi(width, height)
+        except (TypeError, ValueError):
+            return False
+        return (
+            expected_base == self._hardware_roi_base
+            and int(decimation) == self._hardware_roi_decimation
+        )
+
+    def apply_hardware_roi(self, width: int, height: int, decimation: int = 1):
+        """应用用户输入的居中硬件 ROI，并返回相机实际值。"""
+
+        if not self.is_connected:
+            raise RuntimeError("请先连接相机，再应用硬件 ROI")
+
+        camera = self._camera
+        camera.stop_grabbing()
+        sensor_size = resolve_sensor_size(camera)
+        # set_coarse_frame 会按传感器尺寸计算居中 ROI，
+        # 同时设置当前预览所需的降采样倍率。
+        set_coarse_frame(
+            camera,
+            mode="decimation",
+            factor=int(decimation),
+            work_width_px=int(width),
+            work_height_px=int(height),
+        )
+        actual = (
+            camera.get_roi()
+            if hasattr(camera, "get_roi")
+            else None
+        )
+        if actual is None:
+            raise RuntimeError("相机适配器不支持读取实际 ROI")
+
+        self._hardware_roi_base = resolve_work_roi(
+            width,
+            height,
+            sensor_size=sensor_size,
+        )
+        self._hardware_roi = tuple(actual)
+        self._hardware_roi_applied = True
+        self._hardware_roi_decimation = int(decimation)
+        logger.info(
+            "硬件 ROI 已应用: 基准=(%d,%d) %dx%d, 实际=(%d,%d) %dx%d",
+            *self._hardware_roi_base,
+            *self._hardware_roi,
+        )
+        self._status_fn(
+            f"硬件 ROI 已应用: {actual[2]}x{actual[3]}"
+        )
+        if self._roi_status_label is not None:
+            self._roi_status_label.setText(
+                f"已应用 ({actual[2]}x{actual[3]}, dec={int(decimation)})"
+            )
+        return self._hardware_roi
 
     def toggle(self, camera_index=0):
         if self._camera is not None:
@@ -97,6 +190,10 @@ class CameraService(QObject):
             return
         camera = self._camera
         self._camera = None
+        self._hardware_roi = None
+        self._hardware_roi_base = None
+        self._hardware_roi_applied = False
+        self._hardware_roi_decimation = None
         self._apply_connected_state(False)
         # close()幂等且从不抛出（内部已含停流），耗时毫秒级，
         # 因此直接在GUI线程执行，不需要命令工作线程。
@@ -119,6 +216,10 @@ class CameraService(QObject):
             camera.close()
             return
         self._camera = claimed
+        self._hardware_roi = None
+        self._hardware_roi_base = None
+        self._hardware_roi_applied = False
+        self._hardware_roi_decimation = None
         self._apply_connected_state(True)
         self._status_fn("相机已连接")
         logger.info("相机已连接")
@@ -148,6 +249,8 @@ class CameraService(QObject):
             self._connection_label.setText(
                 "已连接" if connected else "未连接"
             )
+        if not connected and self._roi_status_label is not None:
+            self._roi_status_label.setText("未应用")
 
     def shutdown(self, timeout_s: float = 5.0) -> bool:
         """程序关闭时收尾：等连接线程退出并释放常驻句柄。"""
@@ -169,5 +272,9 @@ class CameraService(QObject):
         self._connect_worker = None
         self._connect_thread = None
         self._camera = None
+        self._hardware_roi = None
+        self._hardware_roi_base = None
+        self._hardware_roi_applied = False
+        self._hardware_roi_decimation = None
         self._apply_connected_state(False)
         return True

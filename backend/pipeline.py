@@ -31,6 +31,7 @@ from backend.collector import (
 )
 from backend.config import FocusConfig
 from backend.detection import detect_roi
+from backend.direct_fine import SoftwareBestFrameCollector
 from backend.result import (
     CalibrateResult,
     SearchResult,
@@ -276,7 +277,239 @@ def run_phase(
         # 原始异常继续交给 run_search / run_calibrate 统一处理。
         raise
 
-def run_search(cfg) -> int:
+def _run_continuous_search(cfg) -> SearchResult:
+    """执行新版单次连续精扫：软件触发采图并返回最佳帧。"""
+
+    cancel = cfg.cancel_event
+    search_start = int(cfg.search_start_um)
+    search_end = search_start + int(cfg.search_span_um)
+    if search_end <= search_start:
+        return SearchResult(
+            rc=1,
+            action="search",
+            error="连续精扫终点必须大于起点",
+        )
+
+    sim = cfg.mode == "sim"
+    motion = None
+    cam = None
+    collector = None
+    borrowed_camera = False
+    ct = {}
+    total_t0 = time.perf_counter()
+
+    try:
+        if sim:
+            from autofocus_sim import (
+                FakeMotionBackend,
+                ScoreMapEvaluator,
+                SimCamera,
+            )
+
+            motion = FakeMotionBackend(search_start, search_end)
+            # 仿真用有限帧数结束采集；真实流程由运动结束决定。
+            sim_count = 32
+            sim_step = max(1, int(cfg.search_span_um) // sim_count)
+            sim_peak = search_start + int(cfg.search_span_um * 0.55)
+            cam = SimCamera(n=sim_count, interval_s=0.001)
+            evaluator = ScoreMapEvaluator(
+                build_sim_scores(
+                    sim_count,
+                    search_start,
+                    sim_step,
+                    sim_peak,
+                )
+            )
+            frame_limit = sim_count
+        else:
+            motion = cfg.motion_backend
+            if motion is None or not motion.is_connected():
+                raise RuntimeError("运动控制器未连接")
+            motion.prepare_new_task()
+            evaluator = OpenCVSharpnessEvaluator()
+
+            if cfg.camera is not None:
+                cam = cfg.camera
+                borrowed_camera = True
+                cam.stop_grabbing()
+            else:
+                from camera import HikCamera
+
+                cam = HikCamera(cfg.camera_index)
+                cam.open()
+                # CLI 没有 CameraService 的手动应用步骤时，
+                # 仍按配置建立一次居中工作窗口。
+                set_coarse_frame(
+                    cam,
+                    cfg.coarse_downsample,
+                    cfg.coarse_binning,
+                    cfg.work_roi_width_px,
+                    cfg.work_roi_height_px,
+                )
+
+            cam.set_exposure(cfg.exposure_us)
+            cam.set_gain(cfg.gain_db)
+            frame_limit = None
+
+        # 连续扫描接口内部也会确认起点；这里先单独定位，
+        # 确保第一张软件触发图像就在扫描起点附近。
+        positioning_t0 = time.perf_counter()
+        motion.move_to_position(
+            search_start,
+            timeout_s=cfg.flyscan_timeout,
+            cancel_event=cancel,
+        )
+        ct["start_position_ms"] = (
+            time.perf_counter() - positioning_t0
+        ) * 1000
+
+        preview_callback = None
+        if cfg.preview_callback is not None:
+            preview_callback = (
+                lambda image, sequence, score: cfg.preview_callback(
+                    image,
+                    "fine",
+                    sequence,
+                    score,
+                )
+            )
+
+        collector = SoftwareBestFrameCollector(
+            cam,
+            evaluator,
+            evaluation_roi=cfg.evaluation_roi,
+            cancel_event=cancel,
+            max_queue=cfg.soft_trigger_queue_size,
+            trigger_interval_s=cfg.soft_trigger_interval_s,
+            frame_timeout_s=cfg.soft_trigger_frame_timeout_s,
+            frame_limit=frame_limit,
+            preview_callback=preview_callback,
+        )
+        collector_start_t0 = time.perf_counter()
+        collector.start()
+        ct["collector_start_ms"] = (
+            time.perf_counter() - collector_start_t0
+        ) * 1000
+
+        scan_t0 = time.perf_counter()
+        motion_result = motion.continuous_scan(
+            search_start,
+            search_end,
+            timeout_s=cfg.flyscan_timeout,
+            cancel_event=cancel,
+            velocity_um_s=cfg.continuous_scan_velocity_um_s,
+        )
+        ct["continuous_motion_ms"] = (
+            time.perf_counter() - scan_t0
+        ) * 1000
+
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError("用户取消")
+
+        collector_stop_t0 = time.perf_counter()
+        collector.stop()
+        ct["collector_stop_ms"] = (
+            time.perf_counter() - collector_stop_t0
+        ) * 1000
+        best = collector.result()
+
+        # 到这里最佳帧已经确定；从此处开始的回起点时间不计入对焦 CT。
+        focus_end_t0 = time.perf_counter()
+        ct["focus_total_ms"] = (
+            focus_end_t0 - total_t0
+        ) * 1000
+
+        return_t0 = time.perf_counter()
+        motion.move_to_position(
+            search_start,
+            timeout_s=cfg.flyscan_timeout,
+            cancel_event=cancel,
+        )
+        ct["return_to_start_ms"] = (
+            time.perf_counter() - return_t0
+        ) * 1000
+        ct["total_with_return_ms"] = (
+            time.perf_counter() - total_t0
+        ) * 1000
+
+        final_image = best.best_image
+        if final_image is not None and cfg.save_dir:
+            os.makedirs(cfg.save_dir, exist_ok=True)
+            save_jpg(
+                final_image,
+                os.path.join(cfg.save_dir, "continuous_best.jpg"),
+            )
+        if final_image is not None and cfg.save_images:
+            os.makedirs(cfg.save_images, exist_ok=True)
+            save_jpg(
+                final_image,
+                os.path.join(cfg.save_images, "continuous_best.jpg"),
+            )
+
+        logger.info(
+            "连续精扫完成：帧数=%d，最佳帧=%d，清晰度=%.3f，"
+            "实际终点=%.3fµm，已回到起点=%dµm",
+            best.processed_count,
+            best.best_index,
+            best.best_score,
+            motion_result.actual_end_um,
+            search_start,
+        )
+        return SearchResult(
+            rc=0,
+            action="search",
+            predicted_peak_um=0.0,
+            ncc_max=0.0,
+            quality="continuous_best_frame",
+            fine_best=best.best_index,
+            final_position_um=float(search_start),
+            fine_best_image=final_image,
+            final_image=final_image,
+            coarse_points=[],
+            fine_points=[],
+            roi=None,
+            roi_src="",
+            detect_box=None,
+            evaluation_roi=best.evaluation_roi_local,
+            ct_ms=ct,
+        )
+    except Exception as error:
+        message = str(error).strip() or type(error).__name__
+        if "取消" in message:
+            logger.info("用户取消连续精扫")
+        else:
+            logger.exception("连续精扫流程异常")
+        if motion is not None:
+            try:
+                motion.cancel_current_motion()
+            except Exception:
+                logger.exception("连续精扫失败后的运动安全清理失败")
+        return SearchResult(
+            rc=1,
+            action="search",
+            error=message,
+            ct_ms=ct,
+        )
+    finally:
+        if collector is not None:
+            try:
+                collector.stop()
+            except Exception:
+                logger.warning("连续精扫结束时停止采集器失败", exc_info=True)
+        if cam is not None and not borrowed_camera:
+            try:
+                cam.close()
+            except Exception:
+                logger.warning("连续精扫结束时关闭相机失败", exc_info=True)
+
+
+def run_search(cfg) -> SearchResult:
+    """搜索入口：统一使用单次连续软件触发精扫。"""
+
+    return _run_continuous_search(cfg)
+
+
+def _run_search_legacy(cfg) -> SearchResult:
     # ── ① 加载模板 ──
     cancel = cfg.cancel_event  # CLI 运行时没有该属性 → None
     strategy_cls = STRATEGIES.get(cfg.strategy)

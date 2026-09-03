@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 from motion.state import MotionState
+from motion.base import ContinuousScanResult
 
 
 class FakeMotionBackend:
@@ -20,6 +21,7 @@ class FakeMotionBackend:
         self._position_um = float(stroke_min)
         self.last_flyscan: Optional[Tuple[int, int, int]] = None
         self.last_capture_position: Optional[int] = None
+        self.last_continuous_scan = None
 
     @property
     def backend_name(self) -> str:
@@ -120,6 +122,51 @@ class FakeMotionBackend:
         time.sleep(0.01)
         return 1
 
+    def continuous_scan(
+        self,
+        start_um: int,
+        end_um: int,
+        timeout_s: float,
+        cancel_event=None,
+        velocity_um_s: float = None,
+    ) -> ContinuousScanResult:
+        if not self.connected or not self._servo_enabled or not self._homed:
+            raise RuntimeError("仿真运动控制器未就绪")
+        if end_um <= start_um:
+            raise ValueError("模拟连续扫描只允许正方向运动")
+        if timeout_s <= 0:
+            raise ValueError("模拟连续扫描超时必须大于0")
+        if velocity_um_s is None:
+            velocity_um_s = 100.0
+        if velocity_um_s <= 0:
+            raise ValueError("模拟连续扫描速度必须大于0")
+        if not self.stroke[0] <= start_um <= self.stroke[1]:
+            raise ValueError("模拟连续扫描起点超出行程")
+        if not self.stroke[0] <= end_um <= self.stroke[1]:
+            raise ValueError("模拟连续扫描终点超出行程")
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("用户取消")
+
+        started = time.perf_counter()
+        self._position_um = float(start_um)
+        self.last_continuous_scan = (
+            int(start_um),
+            int(end_um),
+            float(velocity_um_s),
+        )
+        # 仿真只保留很短的等待，用于让调用方仍能观察到异步边界。
+        time.sleep(min(0.05, max(0.001, (end_um - start_um) / velocity_um_s)))
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("用户取消")
+        self._position_um = float(end_um)
+        return ContinuousScanResult(
+            start_um=int(start_um),
+            end_um=int(end_um),
+            actual_end_um=float(end_um),
+            velocity_um_s=float(velocity_um_s),
+            motion_elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
+
     def move_to_position(self, position_um, timeout_s, cancel_event=None):
         if not self.connected or not self._servo_enabled or not self._homed:
             raise RuntimeError("仿真运动控制器未就绪")
@@ -175,6 +222,8 @@ class SimCamera:
         self._n = n
         self._interval = interval_s
         self._callback = None
+        self._trigger_mode = "off"
+        self._trigger_index = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -194,7 +243,7 @@ class SimCamera:
         pass
 
     def set_trigger_mode(self, mode="off"):
-        pass
+        self._trigger_mode = mode
 
     def capture_frame(self, timeout_ms=1000):
         """返回一张占位图，供AI策略离线验证接口。"""
@@ -205,6 +254,11 @@ class SimCamera:
         self._callback = callback
 
     def start_grabbing(self):
+        if self._trigger_mode == "software":
+            self._stop.clear()
+            self._trigger_index = 0
+            return
+
         def emit():
             for _ in range(self._n):
                 if self._stop.is_set():
@@ -216,6 +270,19 @@ class SimCamera:
         self._stop.clear()
         self._thread = threading.Thread(target=emit, daemon=True)
         self._thread.start()
+
+    def trigger_software(self):
+        if self._trigger_mode != "software":
+            raise RuntimeError("仿真相机当前不是软件触发模式")
+        if self._stop.is_set() or self._callback is None:
+            raise RuntimeError("仿真相机尚未取流")
+        image = np.full(
+            (64, 64, 3),
+            self._trigger_index % 255,
+            dtype=np.uint8,
+        )
+        self._trigger_index += 1
+        self._callback(image)
 
     def stop_grabbing(self):
         self._stop.set()

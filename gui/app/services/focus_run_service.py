@@ -23,6 +23,8 @@ class FocusRunService:
             motion_backend_fn,
             motion_state_fn,
             camera_fn,
+            camera_roi_applied_fn,
+            camera_roi_current_fn,
             confirm_fn,
             status_fn,
     ):
@@ -36,6 +38,8 @@ class FocusRunService:
         self._motion_backend_fn = motion_backend_fn
         self._motion_state_fn = motion_state_fn
         self._camera_fn = camera_fn
+        self._camera_roi_applied_fn = camera_roi_applied_fn
+        self._camera_roi_current_fn = camera_roi_current_fn
         self._confirm_fn = confirm_fn
         self._status_fn = status_fn
 
@@ -75,7 +79,7 @@ class FocusRunService:
                 motion_description = "丝杆将执行标定全扫"
             else:
                 action_name = "搜索对焦"
-                motion_description = "丝杆将执行粗扫、精扫和定点移动"
+                motion_description = "丝杆将执行一次连续精扫并回到起始点"
 
             confirmed = self._confirm_fn(
                 f"即将执行真实{action_name}。\n\n"
@@ -151,18 +155,11 @@ class FocusRunService:
             phase_name = "标定"
             requires_scan = True
 
-        elif cfg.strategy == "ncc":
-            start_um = cfg.search_start_um
-            span_um = cfg.search_span_um
-            step_um = cfg.coarse_step_um
-            phase_name = "NCC 搜索"
-            requires_scan = True
-
         else:
             start_um = cfg.search_start_um
             span_um = cfg.search_span_um
             step_um = None
-            phase_name = "AI 搜索"
+            phase_name = "连续精扫"
             requires_scan = False
 
         end_um = start_um + span_um
@@ -174,6 +171,14 @@ class FocusRunService:
             errors.append(
                 f"{phase_name}跨度必须大于 0"
             )
+
+        if cfg.action != "calibrate":
+            if cfg.continuous_scan_velocity_um_s <= 0:
+                errors.append("连续运动速度必须大于 0")
+            if cfg.soft_trigger_interval_s < 0:
+                errors.append("软触发间隔不能小于 0")
+            if cfg.soft_trigger_frame_timeout_s <= 0:
+                errors.append("单帧回调超时必须大于 0")
 
         if requires_scan:
             if step_um <= 0:
@@ -238,6 +243,18 @@ class FocusRunService:
             camera = cfg.camera
             if camera is None or not camera.is_connected:
                 errors.append("请先连接相机（相机参数组中的“连接相机”）")
+            elif not self._camera_roi_applied_fn():
+                errors.append(
+                    "请先连接相机并点击“应用相机 ROI”，再开始真实对焦"
+                )
+            elif not self._camera_roi_current_fn(
+                cfg.work_roi_width_px,
+                cfg.work_roi_height_px,
+                cfg.coarse_binning,
+            ):
+                errors.append(
+                    "硬件 ROI 参数已改变，请重新点击“应用相机 ROI”"
+                )
 
         if cfg.mode == "real" and stroke_range is not None:
             stroke_min, stroke_max = stroke_range
@@ -263,32 +280,7 @@ class FocusRunService:
         # -------------------------------------------------
         # 4. 搜索任务专用检查
         # -------------------------------------------------
-        if cfg.action == "search":
-            if cfg.strategy == "ncc":
-                if cfg.fine_step_um > cfg.coarse_step_um:
-                    warnings.append(
-                        f"精扫步距 {cfg.fine_step_um} μm "
-                        f"大于粗扫步距 "
-                        f"{cfg.coarse_step_um} μm"
-                    )
-
-                self._validate_template(
-                    cfg.template,
-                    errors,
-                    warnings,
-                )
-
-            elif cfg.strategy == "dl":
-                self._validate_dl_config(
-                    cfg,
-                    errors,
-                    warnings,
-                )
-
-            else:
-                errors.append(
-                    f"不支持的搜索策略: {cfg.strategy}"
-                )
+        # 搜索统一走连续软件触发精扫，不再要求 NCC 模板或 AI 模型。
 
         return errors, warnings
 

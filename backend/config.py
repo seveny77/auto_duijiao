@@ -4,6 +4,8 @@
 from dataclasses import dataclass, field
 from typing import Optional,Callable
 
+from backend.focus_roi import EvaluationRoi
+
 # 预览回调的参数约定：
 #
 # callback(
@@ -58,6 +60,9 @@ class FocusConfig:
     # 第一版固定在传感器中心，不单独配置 OffsetX/OffsetY。
     work_roi_width_px: int = 0
     work_roi_height_px: int = 0
+    # 清晰度评价 ROI，坐标相对于相机硬件 ROI 输出图像左上角。
+    # None 表示第一张图到达后自动使用整张硬件 ROI 图像。
+    evaluation_roi: Optional[EvaluationRoi] = None
     detect_model: str = "assets/models/yolo/best.pt"
     detect_conf: float = 0.5
     roi_fallback_size: int = 300
@@ -68,6 +73,11 @@ class FocusConfig:
     flyscan_timeout: float = 600.0
     frame_wait_timeout: float = 60.0
     final_frame_timeout: float = 3.0
+    # 新版连续精扫使用软件触发；0 表示处理完上一帧后立即触发下一帧。
+    soft_trigger_interval_s: float = 0.0
+    soft_trigger_frame_timeout_s: float = 1.0
+    soft_trigger_queue_size: int = 2
+    continuous_scan_velocity_um_s: float = 50.0
     yes: bool = False
 
     cancel_event: Optional[object] = None      # 运行期注入：停止开关

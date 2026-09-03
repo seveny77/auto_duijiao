@@ -593,6 +593,30 @@ class HikCamera:
 
         return True
 
+    def get_roi(self) -> tuple[int, int, int, int]:
+        """读取相机当前实际生效的 ROI。"""
+
+        cam = self._cam
+        if cam is None:
+            raise RuntimeError("相机未打开，无法读取 ROI")
+
+        values = {}
+        for key in ("OffsetX", "OffsetY", "Width", "Height"):
+            info = MVCC_INTVALUE()
+            ret = cam.MV_CC_GetIntValue(key, info)
+            if ret != 0:
+                raise RuntimeError(
+                    f"ROI 读取失败: node={key}, error=0x{ret:X}"
+                )
+            values[key] = int(info.nCurValue)
+
+        return (
+            values["OffsetX"],
+            values["OffsetY"],
+            values["Width"],
+            values["Height"],
+        )
+
     def _set_sampling_axis(
             self,
             feature_name: str,

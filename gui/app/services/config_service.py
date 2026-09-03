@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from backend.config import FocusConfig
+from backend.focus_roi import normalize_evaluation_roi
 
 
 logger = logging.getLogger(__name__)
@@ -68,29 +69,38 @@ class ConfigService:
             path: str,
             panel,
             project_root: str,
+            image_widget=None,
     ):
         self._path = path
         self._panel = panel
         self._project_root = project_root
+        self._image_widget = image_widget
         self._loaded_config = {}
 
+    def _current_evaluation_roi(self):
+        """返回图像视图中的局部像素 ROI，或恢复后的待应用值。"""
+
+        if self._image_widget is not None:
+            return self._image_widget.evaluation_roi
+        try:
+            return normalize_evaluation_roi(
+                self._loaded_config.get("evaluation_roi")
+            )
+        except ValueError:
+            return None
+
     def _current_strategy(self) -> str:
-        """根据当前策略选项卡返回后端策略名称。"""
+        """返回新版连续精扫策略名称。"""
 
-        current_index = (
-            self._panel.strategy_tabs.currentIndex()
-        )
-
-        if current_index == self._panel.ai_tab_index:
-            return "dl"
-
-        return "ncc"
+        return "continuous"
 
     def collect(self) -> dict:
         """收集参数面板中的当前配置。"""
 
+        evaluation_roi = self._current_evaluation_roi()
+
         return {
-            "action": self._panel.action_combo.currentText(),
+            "action": "搜索对焦",
             "mode": self._panel.mode_combo.currentText(),
             "strategy": self._current_strategy(),
             "skip_confirm": self._panel.skip_confirm_check.isChecked(),
@@ -99,6 +109,11 @@ class ConfigService:
             "decimation": self._panel.decimation_combo.currentText(),
             "work_roi_width_px": self._panel.work_roi_width_spin.value(),
             "work_roi_height_px": self._panel.work_roi_height_spin.value(),
+            "evaluation_roi": (
+                list(evaluation_roi)
+                if evaluation_roi is not None
+                else None
+            ),
             # 轴卡和E4O4的SDK路径属于工控机本地配置，
             # 不在主界面上占用大量编辑控件。
             "motion": self._motion_values(),
@@ -106,6 +121,15 @@ class ConfigService:
             "search_span_um": self._panel.search_span_spin.value(),
             "fine_step_um": self._panel.fine_step_spin.value(),
             "fine_half_steps": self._panel.fine_half_spin.value(),
+            "continuous_velocity_um_s": (
+                self._panel.continuous_velocity_spin.value()
+            ),
+            "soft_trigger_interval_ms": (
+                self._panel.soft_trigger_interval_spin.value()
+            ),
+            "soft_trigger_timeout_s": (
+                self._panel.soft_trigger_timeout_spin.value()
+            ),
             "coarse_step_um": self._panel.coarse_step_spin.value(),
             "save_dir": self._panel.save_edit.text(),
             "template": self._panel.template_edit.text(),
@@ -124,10 +148,6 @@ class ConfigService:
 
         cfg = FocusConfig()
 
-        ncc_action_map = {
-            "NCC搜索": "search",
-            "NCC模板标定": "calibrate",
-        }
         mode_map = {
             "真实": "real",
             "仿真": "sim",
@@ -138,16 +158,8 @@ class ConfigService:
             "4x4": 4,
         }
 
-        cfg.strategy = self._current_strategy()
-
-        if cfg.strategy == "dl":
-            # AI 模型已经在外部完成训练，
-            # 当前 GUI 没有 AI 标定流程。
-            cfg.action = "search"
-        else:
-            cfg.action = ncc_action_map[
-                self._panel.ncc_action_combo.currentText()
-            ]
+        cfg.strategy = "continuous"
+        cfg.action = "search"
 
         cfg.mode = mode_map[
             self._panel.mode_combo.currentText()
@@ -202,6 +214,7 @@ class ConfigService:
         cfg.work_roi_height_px = (
             self._panel.work_roi_height_spin.value()
         )
+        cfg.evaluation_roi = self._current_evaluation_roi()
         cfg.coarse_step_um = (
             self._panel.coarse_step_spin.value()
         )
@@ -210,6 +223,15 @@ class ConfigService:
         )
         cfg.fine_half_steps = (
             self._panel.fine_half_spin.value()
+        )
+        cfg.continuous_scan_velocity_um_s = (
+            self._panel.continuous_velocity_spin.value()
+        )
+        cfg.soft_trigger_interval_s = (
+            self._panel.soft_trigger_interval_spin.value() / 1000.0
+        )
+        cfg.soft_trigger_frame_timeout_s = (
+            self._panel.soft_trigger_timeout_spin.value()
         )
         cfg.search_start_um = (
             self._panel.search_start_spin.value()
@@ -269,20 +291,8 @@ class ConfigService:
             "sim": "仿真",
         }.get(mode, mode)
 
-        action = cfg.get(
-            "action",
-            "搜索对焦",
-        )
-        action = {
-            "search": "搜索对焦",
-            "calibrate": "图像标定",
-            "离线标定": "图像标定",
-        }.get(action, action)
-
-        strategy = cfg.get(
-            "strategy",
-            "ncc",
-        )
+        # 新版主入口固定为连续软件触发精扫；旧配置字段保留读取兼容性。
+        action = "搜索对焦"
 
         self._panel.action_combo.setCurrentText(
             action
@@ -291,17 +301,8 @@ class ConfigService:
             mode
         )
 
-        if strategy == "dl":
-            strategy_tab_index = (
-                self._panel.ai_tab_index
-            )
-        else:
-            strategy_tab_index = (
-                self._panel.ncc_tab_index
-            )
-
         self._panel.strategy_tabs.setCurrentIndex(
-            strategy_tab_index
+            self._panel.ncc_tab_index
         )
 
         self._panel.skip_confirm_check.setChecked(
@@ -334,6 +335,15 @@ class ConfigService:
         self._panel.fine_half_spin.setValue(
             cfg.get("fine_half_steps", 5)
         )
+        self._panel.continuous_velocity_spin.setValue(
+            cfg.get("continuous_velocity_um_s", 50.0)
+        )
+        self._panel.soft_trigger_interval_spin.setValue(
+            cfg.get("soft_trigger_interval_ms", 0.0)
+        )
+        self._panel.soft_trigger_timeout_spin.setValue(
+            cfg.get("soft_trigger_timeout_s", 1.0)
+        )
         self._panel.coarse_step_spin.setValue(
             cfg.get("coarse_step_um", 100)
         )
@@ -364,6 +374,22 @@ class ConfigService:
         self._panel.shot_position_spin.setValue(
             cfg.get("shot_position_um", 12000)
         )
+
+        evaluation_roi = None
+        try:
+            evaluation_roi = normalize_evaluation_roi(
+                cfg.get("evaluation_roi")
+            )
+        except ValueError as error:
+            logger.warning(
+                "配置中的清晰度 ROI 无效，将在首帧到达后恢复整图: %s",
+                error,
+            )
+        if self._image_widget is not None:
+            self._image_widget.set_evaluation_roi(
+                evaluation_roi,
+                emit_signal=False,
+            )
 
     def save(self) -> bool:
         """把当前参数保存到 JSON。"""

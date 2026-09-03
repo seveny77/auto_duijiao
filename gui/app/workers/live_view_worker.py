@@ -153,19 +153,50 @@ class LiveViewWorker(QObject):
 
             factor = self._cam_params.get("dec", 1)
 
-            set_coarse_frame(
-                cam,
-                mode="decimation",
-                factor=factor,
-                work_width_px=self._cam_params.get(
-                    "work_roi_width_px",
-                    0,
-                ),
-                work_height_px=self._cam_params.get(
-                    "work_roi_height_px",
-                    0,
-                ),
+            # 相机已由 CameraService 手动应用硬件 ROI 时，
+            # 预览直接复用当前设置，避免启动预览再次改窗。
+            roi_applied = (
+                borrowed
+                and self._cam_params.get(
+                    "hardware_roi_applied",
+                    False,
+                )
             )
+            if roi_applied:
+                applied_factor = self._cam_params.get(
+                    "hardware_roi_decimation"
+                )
+                if applied_factor is not None and int(applied_factor) != int(factor):
+                    raise RuntimeError(
+                        "当前下采样倍率与已应用硬件 ROI 不一致，请重新应用相机 ROI"
+                    )
+                applied_base = self._cam_params.get("hardware_roi_base")
+                requested_base = (
+                    self._cam_params.get("work_roi_width_px", 0),
+                    self._cam_params.get("work_roi_height_px", 0),
+                )
+                if (
+                    applied_base is not None
+                    and tuple(applied_base[2:]) != requested_base
+                ):
+                    raise RuntimeError(
+                        "当前硬件 ROI 尺寸已改变，请重新应用相机 ROI"
+                    )
+                logger.info("实时预览复用已应用硬件 ROI")
+            else:
+                set_coarse_frame(
+                    cam,
+                    mode="decimation",
+                    factor=factor,
+                    work_width_px=self._cam_params.get(
+                        "work_roi_width_px",
+                        0,
+                    ),
+                    work_height_px=self._cam_params.get(
+                        "work_roi_height_px",
+                        0,
+                    ),
+                )
 
             # 实时预览使用自由运行模式：
             # 相机连续曝光，不等待 PLC 硬件触发。

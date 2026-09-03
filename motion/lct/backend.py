@@ -8,7 +8,7 @@ import time
 
 import perf
 
-from motion.base import MotionBackend
+from motion.base import ContinuousScanResult, MotionBackend
 from motion.state import MotionState
 from motion.lct.config import LctMotionConfig
 from motion.lct.e4o4_api import E4O4Api
@@ -747,6 +747,120 @@ class LctMotionBackend(MotionBackend):
                     },
                     prefix=f"lct.{phase_key}",
                 )
+
+    def continuous_scan(
+        self,
+        start_um: int,
+        end_um: int,
+        timeout_s: float,
+        cancel_event=None,
+        velocity_um_s: float | None = None,
+    ) -> ContinuousScanResult:
+        """从起点连续移动到终点，不配置 E4O4 比较器。"""
+
+        with self._lock:
+            self._require_connected()
+            self._raise_if_cancelled(cancel_event)
+            if end_um <= start_um:
+                raise ValueError(
+                    "连续扫描只允许正方向运动: "
+                    f"start={start_um}, end={end_um}"
+                )
+            if timeout_s <= 0:
+                raise ValueError(f"连续扫描超时必须大于0: {timeout_s}")
+
+            velocity_um_s = (
+                self._config.scan_velocity_um_s
+                if velocity_um_s is None
+                else float(velocity_um_s)
+            )
+            if velocity_um_s <= 0:
+                raise ValueError(
+                    f"连续扫描速度必须大于0: {velocity_um_s}"
+                )
+
+            start_counts = self._config.um_to_counts(start_um)
+            end_counts = self._config.um_to_counts(end_um)
+            self._validate_target(start_counts)
+            self._validate_target(end_counts)
+            self._require_autofocus_ready()
+
+            velocity_counts_s = (
+                velocity_um_s * self._config.counts_per_um
+            )
+            deadline = time.monotonic() + float(timeout_s)
+            detail_t0 = time.perf_counter()
+            move_started = False
+            self._operation = "continuous_scan"
+
+            try:
+                positioning_t0 = time.perf_counter()
+                self._move_to(
+                    start_counts,
+                    self._config.positioning_velocity_counts_s,
+                    self._remaining(deadline),
+                    cancel_event,
+                )
+                positioning_ms = (
+                    time.perf_counter() - positioning_t0
+                ) * 1000
+
+                logger.info(
+                    "连续扫描配置：起点=%d，终点=%d，速度=%.1f µm/s，"
+                    "sdk_velocity=%.0f count/s",
+                    start_counts,
+                    end_counts,
+                    velocity_um_s,
+                    velocity_counts_s,
+                )
+                scan_t0 = time.perf_counter()
+                self._m60.absolute_move(
+                    self._config.axis_no,
+                    end_counts,
+                    velocity_counts_s,
+                )
+                move_started = True
+                actual_counts = self._m60.wait_motion_complete(
+                    self._config.axis_no,
+                    end_counts,
+                    self._remaining(deadline),
+                    self._config.position_tolerance_counts,
+                    cancel_event=cancel_event,
+                )
+                move_started = False
+                scan_ms = (time.perf_counter() - scan_t0) * 1000
+                total_ms = (time.perf_counter() - detail_t0) * 1000
+                logger.info(
+                    "连续扫描完成：起点=%d，终点=%d，实际=%d，耗时=%.1fms",
+                    start_counts,
+                    end_counts,
+                    actual_counts,
+                    total_ms,
+                )
+                perf.ingest(
+                    {
+                        "positioning_ms": positioning_ms,
+                        "scan_motion_ms": scan_ms,
+                        "total_ms": total_ms,
+                    },
+                    prefix="lct.continuous_scan",
+                )
+                return ContinuousScanResult(
+                    start_um=int(start_um),
+                    end_um=int(end_um),
+                    actual_end_um=self._config.counts_to_um(actual_counts),
+                    velocity_um_s=float(velocity_um_s),
+                    motion_elapsed_ms=total_ms,
+                )
+            except Exception:
+                if move_started:
+                    self._safe_stop_axis()
+                self._safe_servo_off()
+                raise
+            finally:
+                if move_started:
+                    self._safe_stop_axis()
+                self._operation = "idle"
 
     def capture_at_position(
         self,

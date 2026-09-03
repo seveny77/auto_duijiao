@@ -136,7 +136,7 @@ class ParamPanel(QWidget):
         self.trigger_mode_label = QLabel("自动切换")
         self.trigger_mode_label.setToolTip(
             "实时预览使用连续取流；"
-            "标定、粗扫、精扫和定点拍照使用硬件触发"
+            "新版连续精扫使用软件触发；旧标定流程仍保留硬件触发"
         )
         self.decimation_combo = QComboBox()
         self.decimation_combo.addItems(["1x1", "2x2", "4x4"])
@@ -162,6 +162,11 @@ class ParamPanel(QWidget):
             "搜索、标定和实时预览共用，省去每次重开"
         )
         self.camera_connection_label = QLabel("未连接")
+        self.camera_roi_apply_btn = QPushButton("应用相机 ROI")
+        self.camera_roi_apply_btn.setToolTip(
+            "连接相机后按输入宽高居中开窗；应用后预览和对焦共用此 ROI"
+        )
+        self.camera_roi_status_label = QLabel("未应用")
         form.addRow(
             "触发模式:",
             self.trigger_mode_label,
@@ -173,6 +178,8 @@ class ParamPanel(QWidget):
         form.addRow("初始开窗高度:", self.work_roi_height_spin)
         form.addRow("连接状态:", self.camera_connection_label)
         form.addRow(self.camera_connect_btn)
+        form.addRow("硬件 ROI 状态:", self.camera_roi_status_label)
+        form.addRow(self.camera_roi_apply_btn)
         return group
 
     # ---------- 流程控制 ----------
@@ -239,6 +246,28 @@ class ParamPanel(QWidget):
         self.fine_half_spin = QSpinBox()
         self.fine_half_spin.setRange(1, 100)
         self.fine_half_spin.setValue(5)
+
+        # 新版连续精扫参数：轴只从起点连续移动到终点，期间由软件触发采图。
+        self.continuous_velocity_spin = QDoubleSpinBox()
+        self.continuous_velocity_spin.setRange(1.0, 5000.0)
+        self.continuous_velocity_spin.setDecimals(1)
+        self.continuous_velocity_spin.setValue(50.0)
+        self.continuous_velocity_spin.setSuffix(" µm/s")
+        self.continuous_velocity_spin.setToolTip("起点到终点的连续运动速度")
+
+        self.soft_trigger_interval_spin = QDoubleSpinBox()
+        self.soft_trigger_interval_spin.setRange(0.0, 1000.0)
+        self.soft_trigger_interval_spin.setDecimals(1)
+        self.soft_trigger_interval_spin.setValue(0.0)
+        self.soft_trigger_interval_spin.setSuffix(" ms")
+        self.soft_trigger_interval_spin.setToolTip("处理完上一帧后等待多久再触发下一帧")
+
+        self.soft_trigger_timeout_spin = QDoubleSpinBox()
+        self.soft_trigger_timeout_spin.setRange(0.1, 10.0)
+        self.soft_trigger_timeout_spin.setDecimals(1)
+        self.soft_trigger_timeout_spin.setValue(1.0)
+        self.soft_trigger_timeout_spin.setSuffix(" s")
+        self.soft_trigger_timeout_spin.setToolTip("单次软件触发等待回调的最长时间")
 
         self.save_edit = QLineEdit()
         self.save_edit.setPlaceholderText(
@@ -410,15 +439,20 @@ class ParamPanel(QWidget):
             self.search_span_spin,
         )
         form.addRow(
-            self.strategy_tabs
+            "运行方式:",
+            QLabel("连续软件触发精扫"),
         )
         form.addRow(
-            "精扫步距(um):",
-            self.fine_step_spin,
+            "连续运动速度:",
+            self.continuous_velocity_spin,
         )
         form.addRow(
-            "精扫半宽(步):",
-            self.fine_half_spin,
+            "软触发间隔:",
+            self.soft_trigger_interval_spin,
+        )
+        form.addRow(
+            "单帧回调超时:",
+            self.soft_trigger_timeout_spin,
         )
         form.addRow(
             "保存图片目录:",
@@ -441,6 +475,9 @@ class ParamPanel(QWidget):
             self.coarse_step_spin,
             self.fine_step_spin,
             self.fine_half_spin,
+            self.continuous_velocity_spin,
+            self.soft_trigger_interval_spin,
+            self.soft_trigger_timeout_spin,
             self.template_load_btn,
         )
 
@@ -478,6 +515,7 @@ class ParamPanel(QWidget):
             self.decimation_combo,
             self.work_roi_width_spin,
             self.work_roi_height_spin,
+            self.camera_roi_apply_btn,
             self.motion_connect_btn,
             self.camera_connect_btn,
             self.motion_reset_btn,

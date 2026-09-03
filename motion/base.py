@@ -2,7 +2,19 @@
 """自动对焦运动后端的公共接口。"""
 
 from abc import ABC, abstractmethod
-from typing import Tuple
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+
+@dataclass(frozen=True)
+class ContinuousScanResult:
+    """一次起点到终点连续运动的结果。"""
+
+    start_um: int
+    end_um: int
+    actual_end_um: float
+    velocity_um_s: float
+    motion_elapsed_ms: float
 
 
 class MotionBackend(ABC):
@@ -109,6 +121,17 @@ class MotionBackend(ABC):
             M60先移动到目标位置前的准备位置，然后以设定速度经过
             position_um；E4O4使用单点预设定比较器触发相机。
         """
+
+    @abstractmethod
+    def continuous_scan(
+        self,
+        start_um: int,
+        end_um: int,
+        timeout_s: float,
+        cancel_event=None,
+        velocity_um_s: Optional[float] = None,
+    ) -> ContinuousScanResult:
+        """从起点连续运动到终点，不配置步距或硬件触发。"""
 
     @abstractmethod
     def move_to_position(

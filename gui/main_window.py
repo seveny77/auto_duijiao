@@ -116,6 +116,7 @@ class MainWindow(QMainWindow):
             path=self._config_path(),
             panel=self.param_panel,
             project_root=PROJECT_ROOT,
+            image_widget=self.image_widget,
         )
         self.config_service.load()
 
@@ -157,6 +158,7 @@ class MainWindow(QMainWindow):
             connect_btn=self.param_panel.camera_connect_btn,
             status_fn=self.status_message.emit,
             connection_label=self.param_panel.camera_connection_label,
+            roi_status_label=self.param_panel.camera_roi_status_label,
         )
         self.focus_run_service = FocusRunService(
             config_service=self.config_service,
@@ -169,6 +171,12 @@ class MainWindow(QMainWindow):
             motion_backend_fn=lambda: self.motion_service.backend,
             motion_state_fn=lambda: self.motion_service.state,
             camera_fn=lambda: self.camera_service.camera,
+            camera_roi_applied_fn=lambda: (
+                self.camera_service.is_hardware_roi_applied
+            ),
+            camera_roi_current_fn=(
+                self.camera_service.is_hardware_roi_current
+            ),
             confirm_fn=self._confirm_motion,
             status_fn=self.status_message.emit,
         )
@@ -257,6 +265,9 @@ class MainWindow(QMainWindow):
         )
         self.param_panel.camera_connect_btn.clicked.connect(
             self._on_camera_connect
+        )
+        self.param_panel.camera_roi_apply_btn.clicked.connect(
+            self._on_apply_camera_roi
         )
         self.param_panel.motion_reset_btn.clicked.connect(
             lambda _checked=False: self.motion_service.clear_alarm()
@@ -761,6 +772,45 @@ class MainWindow(QMainWindow):
         # GUI当前没有相机索引设置项，与FocusConfig默认值保持一致。
         self.camera_service.toggle(0)
 
+    def _on_apply_camera_roi(self):
+        """按宽高居中应用硬件 ROI；连接后由用户明确触发。"""
+
+        if (
+            self.live_view_service.is_active
+            or self.live_view_service.is_running
+        ):
+            self.status_message.emit("请先停止实时预览，再应用硬件 ROI")
+            return
+
+        if not self.camera_service.is_connected:
+            self.status_message.emit("请先连接相机，再应用硬件 ROI")
+            return
+
+        dec_map = {"1x1": 1, "2x2": 2, "4x4": 4}
+        factor = dec_map[self.param_panel.decimation_combo.currentText()]
+        width = self.param_panel.work_roi_width_spin.value()
+        height = self.param_panel.work_roi_height_spin.value()
+
+        try:
+            self.camera_service.apply_hardware_roi(
+                width,
+                height,
+                decimation=factor,
+            )
+        except Exception as error:
+            logger.exception("应用硬件 ROI 失败")
+            self._log(f"[相机] 硬件 ROI 应用失败: {error}")
+            QMessageBox.warning(self, "硬件 ROI", str(error))
+            return
+
+        base_roi = self.camera_service.hardware_roi_base
+        if base_roi is not None:
+            self.param_panel.work_roi_width_spin.setValue(base_roi[2])
+            self.param_panel.work_roi_height_spin.setValue(base_roi[3])
+        self._log(
+            f"[相机] 硬件 ROI 已应用: 实际={self.camera_service.hardware_roi}"
+        )
+
     def _on_motion_servo(self):
         """手动使能前二次确认；去使能直接执行。"""
 
@@ -857,6 +907,15 @@ class MainWindow(QMainWindow):
             ),
             "work_roi_height_px": (
                 self.param_panel.work_roi_height_spin.value()
+            ),
+            "hardware_roi_applied": (
+                self.camera_service.is_hardware_roi_applied
+            ),
+            "hardware_roi_decimation": (
+                self.camera_service.hardware_roi_decimation
+            ),
+            "hardware_roi_base": (
+                self.camera_service.hardware_roi_base
             ),
         }
 

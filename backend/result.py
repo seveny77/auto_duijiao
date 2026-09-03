@@ -4,6 +4,8 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
+from backend.focus_roi import EvaluationRoi
+
 
 @dataclass
 class SearchResult:
@@ -22,6 +24,9 @@ class SearchResult:
     roi: Optional[tuple] = None
     roi_src: str = ""
     detect_box: Optional[tuple] = None
+    # 清晰度评价 ROI 使用硬件 ROI 图像内的局部像素坐标。
+    # 它只用于评价和 GUI 图元，不允许绘制进 final_image 原图。
+    evaluation_roi: Optional[EvaluationRoi] = None
     ct_ms: dict = field(default_factory=dict)
 
 
