@@ -51,6 +51,7 @@ from gui.app.widgets.image_view import ImageWidget, ZoomableGraphicsView
 class InspectionPanel(QWidget):
     """检测结果工作区的第一版可视化框架。"""
 
+    focus_requested = pyqtSignal()
     model_load_requested = pyqtSignal(str)
     offline_image_test_requested = pyqtSignal(str, object)
     inspection_config_save_requested = pyqtSignal(object)
@@ -81,6 +82,9 @@ class InspectionPanel(QWidget):
         self._apply_preview_state()
         self._apply_style()
 
+        self.focus_btn.clicked.connect(
+            lambda _checked=False: self.focus_requested.emit()
+        )
         self.select_model_btn.clicked.connect(self._choose_model)
         self.load_model_btn.clicked.connect(self._request_model_load)
         self.select_local_image_btn.clicked.connect(self._choose_offline_image)
@@ -165,6 +169,8 @@ class InspectionPanel(QWidget):
         toolbar.addWidget(self.show_masks_check)
         toolbar.addWidget(self.show_circle_check)
         toolbar.addWidget(self.show_rings_check)
+        self.focus_btn = QPushButton("执行对焦")
+        toolbar.addWidget(self.focus_btn)
         self.select_local_image_btn = QPushButton("选择本地图片…")
         toolbar.addWidget(self.select_local_image_btn)
         toolbar.addStretch(1)

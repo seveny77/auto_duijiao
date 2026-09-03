@@ -112,9 +112,52 @@ class ContourCircleDetector:
             if candidate is not None:
                 candidates.append(candidate)
 
+        used_global_otsu_fallback = False
+        if not candidates:
+            # 大面积亮端面包围中央深色圆时，局部背景差分容易优先
+            # 提取端面外侧阴影。此时用全局反向 Otsu 保留深色目标，
+            # 并使用 RETR_LIST 读取位于亮端面内部的嵌套圆轮廓。
+            _fallback_threshold, fallback_binary = cv2.threshold(
+                blurred,
+                0,
+                255,
+                cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+            )
+            fallback_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (5, 5),
+            )
+            fallback_binary = cv2.morphologyEx(
+                fallback_binary,
+                cv2.MORPH_OPEN,
+                fallback_kernel,
+            )
+            fallback_contours, _fallback_hierarchy = cv2.findContours(
+                fallback_binary,
+                cv2.RETR_LIST,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+            for contour in fallback_contours:
+                candidate = _candidate_from_contour(
+                    contour,
+                    image_width=fallback_binary.shape[1],
+                    image_height=fallback_binary.shape[0],
+                    small_min_radius=small_min_radius,
+                    small_max_radius=small_max_radius,
+                    factor=factor,
+                    cv2=cv2,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+            used_global_otsu_fallback = bool(candidates)
+
         warnings: list[str] = []
         if not candidates:
             return [], None, False, ["轮廓找圆未找到候选圆"]
+        if used_global_otsu_fallback:
+            warnings.append(
+                "局部背景找圆无候选，已使用全局反向 Otsu 兜底"
+            )
 
         candidates.sort(key=lambda item: item.score, reverse=True)
         raw_candidate_count = len(candidates)

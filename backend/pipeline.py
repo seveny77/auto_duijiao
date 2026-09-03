@@ -1,6 +1,7 @@
 import glob
 import logging
 import os
+import threading
 import time
 from typing import (
     Dict,
@@ -72,6 +73,54 @@ def compute_interval(
     lo = max(lo, search_start)
     hi = min(hi, search_start + search_span)
     return lo, hi, best, peak
+
+
+def capture_software_frame_by_callback(
+    cam,
+    *,
+    timeout_s: float,
+):
+    """复用相机 SDK 回调执行一次软件触发并返回独立图像。"""
+
+    timeout_value = float(timeout_s)
+    if timeout_value <= 0:
+        raise ValueError("软件触发取图超时时间必须大于 0")
+
+    frame_ready = threading.Event()
+    frame_holder = {}
+
+    def on_frame(image):
+        if frame_ready.is_set():
+            return
+        if image is None or getattr(image, "size", 0) == 0:
+            return
+
+        # 脱离相机 SDK 回调生命周期，避免返回后继续引用底层缓冲区。
+        frame_holder["image"] = image.copy()
+        frame_ready.set()
+
+    # 前一阶段已经停止取流，此处只切换触发模式和回调；曝光、
+    # 增益、ROI、binning、decimation 均保留相机最后一次设置。
+    cam.set_trigger_mode("software")
+    cam.register_frame_callback(on_frame)
+    cam.start_grabbing()
+
+    try:
+        cam.trigger_software()
+        if not frame_ready.wait(timeout_value):
+            raise RuntimeError(
+                "软件触发已发送，但在 "
+                f"{timeout_value * 1000:.0f}ms 内"
+                "没有通过相机回调收到图像"
+            )
+
+        image = frame_holder.get("image")
+        if image is None:
+            raise RuntimeError("软件触发回调完成，但没有有效图像")
+        return image
+    finally:
+        cam.stop_grabbing()
+
 
 def run_phase(
     motion,
@@ -645,6 +694,7 @@ def run_search(cfg) -> int:
                 ) * 1000,
             )
 
+
         single_capture_t0 = time.perf_counter()
         final_trigger_count = motion.capture_at_position(
             final_position_um,
@@ -751,6 +801,52 @@ def run_search(cfg) -> int:
             predicted_peak_um,
             quality,
         )
+        # 增加软触发动作。前序飞拍已注册 SDK 图像回调，因此这里继续
+        # 使用回调接收图像，避免与同步 GetImageBuffer 取帧方式冲突。
+        if not sim:
+            final_img = capture_software_frame_by_callback(
+                cam,
+                timeout_s=max(
+                    2.0,
+                    float(cfg.final_frame_timeout),
+                ),
+            )
+            try:
+                save_root = r"D:\saveimg"
+                os.makedirs(save_root, exist_ok=True)
+                capture_time = time.time()
+                timestamp = time.strftime(
+                    "%Y%m%d_%H%M%S",
+                    time.localtime(capture_time),
+                )
+                milliseconds = int(
+                    (capture_time % 1) * 1000
+                )
+                save_path = os.path.join(
+                    save_root,
+                    f"{timestamp}_{milliseconds:03d}.jpg",
+                )
+                saved = cv2.imwrite(
+                    save_path,
+                    final_img,
+                    [cv2.IMWRITE_JPEG_QUALITY, 100],
+                )
+                if not saved:
+                    raise RuntimeError("OpenCV返回保存失败")
+                logger.info(
+                    "最终原图已保存: %s",
+                    save_path,
+                )
+            except Exception as error:
+                logger.warning(
+                    "最终原图保存失败: %s",
+                    error,
+                )
+            logger.info(
+                "最终位置软件触发采图完成: %dx%d",
+                final_img.shape[1],
+                final_img.shape[0],
+            )
         return SearchResult(  # 成功
             rc=0, action="search",
             predicted_peak_um=predicted_peak_um,

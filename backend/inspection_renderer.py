@@ -31,8 +31,8 @@ def render_inspection_overlay(
     """返回检测结果图，不修改输入图像，也不填充多边形内部。"""
 
     canvas = _prepare_canvas(image, background)
-    height, width = canvas.shape[:2]
-    line_width = max(1, round(min(width, height) / 1000))
+    # 检测叠加线统一使用 1 px，避免高分辨率图像上的轮廓过粗。
+    line_width = 1
 
     if show_contours:
         _draw_instance_contours(canvas, result, line_width)
@@ -66,8 +66,8 @@ def render_image_inspection_overlay(
     """绘制一张原图内所有端面，不根据 GUI 当前选择过滤结果。"""
 
     canvas = _prepare_canvas(image, background)
-    height, width = canvas.shape[:2]
-    line_width = max(1, round(min(width, height) / 1000))
+    # 多端面结果与单端面结果保持相同的细线显示。
+    line_width = 1
     circle_results = list(getattr(result, "circle_results", []) or [])
 
     # 结构辅助线先画，红色缺陷轮廓最后画，避免缺陷被圆环覆盖。

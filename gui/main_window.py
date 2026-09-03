@@ -196,6 +196,9 @@ class MainWindow(QMainWindow):
         self.inspection_panel.model_load_requested.connect(
             self._on_inspection_model_load
         )
+        self.inspection_panel.focus_requested.connect(
+            self.focus_run_service.start
+        )
         self.inspection_panel.offline_image_test_requested.connect(
             self._on_offline_inspection_image
         )

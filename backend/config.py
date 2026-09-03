@@ -55,13 +55,13 @@ class FocusConfig:
     fine_binning: int = 1
     detect_model: str = "assets/models/yolo/best.pt"
     detect_conf: float = 0.5
-    roi_fallback_size: int = 1500
+    roi_fallback_size: int = 700
 
     save_dir: Optional[str] = None
     save_images: Optional[str] = None
     save_all: bool = False
     flyscan_timeout: float = 600.0
-    frame_wait_timeout: float = 60.0
+    frame_wait_timeout: float = 5.0
     final_frame_timeout: float = 3.0
     yes: bool = False
 

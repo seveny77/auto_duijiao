@@ -5,18 +5,16 @@
   "inference_confidence_floor": 0.1,
   "mm_per_pixel": 0.24,
   "history_root": "inspection_history",
+  
   "circle": {
-    "downsample_factor": 4,
-    "blur_kernel_size": 7,
-    "hough_dp": 1.2,
-    "hough_param1": 100.0,
-    "hough_param2": 30.0,
-    "min_center_distance_px": 700.0,
-    "min_radius_px": 250,
-    "max_radius_px": 300,
-    "expected_circle_count": 5,
-    "min_candidate_score": 0.5
-  },
+  "downsample_factor": 4,
+  "blur_kernel_size": 7,
+  "min_center_distance_px": 700.0,
+  "min_radius_px": 180,
+  "max_radius_px": 320,
+  "expected_circle_count": 5,
+  "min_candidate_score": 0.48
+},
   "region_rules": [
     {
       "region_id": "region_1",
