@@ -157,6 +157,7 @@ class MainWindow(QMainWindow):
             connect_btn=self.param_panel.camera_connect_btn,
             status_fn=self.status_message.emit,
             connection_label=self.param_panel.camera_connection_label,
+            roi_status_label=self.param_panel.camera_roi_status_label,
         )
         self.focus_run_service = FocusRunService(
             config_service=self.config_service,
@@ -268,6 +269,9 @@ class MainWindow(QMainWindow):
         )
         self.param_panel.camera_connect_btn.clicked.connect(
             self._on_camera_connect
+        )
+        self.param_panel.camera_roi_apply_btn.clicked.connect(
+            self._on_apply_camera_roi
         )
         self.param_panel.motion_reset_btn.clicked.connect(
             lambda _checked=False: self.motion_service.clear_alarm()
@@ -771,6 +775,63 @@ class MainWindow(QMainWindow):
 
         # GUI当前没有相机索引设置项，与FocusConfig默认值保持一致。
         self.camera_service.toggle(0)
+
+    def _on_apply_camera_roi(self):
+        """把界面输入的居中宽高和降采样应用到当前相机。"""
+
+        if (
+            self.live_view_service.is_active
+            or self.live_view_service.is_running
+        ):
+            self.status_message.emit(
+                "请先停止实时预览，再应用相机 ROI"
+            )
+            QMessageBox.warning(
+                self,
+                "实时预览正在运行",
+                "实时预览正在占用相机，请先停止实时预览。",
+            )
+            return
+
+        if not self.camera_service.is_connected:
+            message = "请先连接相机，再应用相机 ROI"
+            self.status_message.emit(message)
+            QMessageBox.warning(self, "相机未连接", message)
+            return
+
+        decimation_map = {
+            "1x1": 1,
+            "2x2": 2,
+            "4x4": 4,
+        }
+        width = self.param_panel.work_roi_width_spin.value()
+        height = self.param_panel.work_roi_height_spin.value()
+        decimation = decimation_map.get(
+            self.param_panel.decimation_combo.currentText(),
+            1,
+        )
+
+        try:
+            actual = self.camera_service.apply_hardware_roi(
+                width,
+                height,
+                decimation,
+            )
+        except Exception as error:
+            logger.exception("应用相机 ROI 失败")
+            message = f"应用相机 ROI 失败: {error}"
+            self.status_message.emit(message)
+            QMessageBox.critical(self, "应用相机 ROI 失败", str(error))
+            return
+
+        x, y, actual_width, actual_height = actual
+        self._log(
+            f"[相机] 已应用居中 ROI: ({x},{y}) "
+            f"{actual_width}x{actual_height}, decimation={decimation}"
+        )
+        self.status_message.emit(
+            f"相机 ROI 已应用: {actual_width}x{actual_height}"
+        )
 
     def _on_motion_servo(self):
         """手动使能前二次确认；去使能直接执行。"""
