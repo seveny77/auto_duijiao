@@ -19,6 +19,9 @@ PreviewCallback = Callable[
     None,
 ]
 
+# 最佳帧确定后、轴回起点前调用。参数为 backend.result.BestFrameReady。
+BestFrameReadyCallback = Callable[[object], None]
+
 @dataclass
 class FocusConfig:
     """字段与 verify_ncc_full 的 parser 参数一一对应，默认值与 parser 一致。"""
@@ -93,5 +96,7 @@ class FocusConfig:
     # CLI 或无界面运行时保持 None，不产生任何预览开销。
     # image, phase, sequence, score
     preview_callback: Optional[PreviewCallback] = None
+    # 连续精扫最佳帧已确定，但运动任务尚未结束时的通知回调。
+    best_frame_ready_callback: Optional[BestFrameReadyCallback] = None
     # 0.1 秒代表最多每秒发送 10 张预览图。
     preview_interval_s: float = 0.1

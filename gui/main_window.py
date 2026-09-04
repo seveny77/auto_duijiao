@@ -140,6 +140,8 @@ class MainWindow(QMainWindow):
         self._inspection_circle_request_config = None
         self._inspection_close_requested = False
         self._inspection_shutdown_connected = False
+        # 连续精扫的最佳图可能先于轴回位完成到达 GUI。
+        self._continuous_best_frame_presented = False
         self.motion_service = MotionService(
             connect_btn=self.param_panel.motion_connect_btn,
             stroke_label=self.param_panel.motion_stroke_label,
@@ -298,6 +300,9 @@ class MainWindow(QMainWindow):
         self.focus_task_service.finished.connect(
             self._on_focus_finished
         )
+        self.focus_task_service.best_frame_ready.connect(
+            self._on_best_frame_ready
+        )
         self.focus_task_service.error.connect(
             self._on_focus_error
         )
@@ -420,10 +425,25 @@ class MainWindow(QMainWindow):
     def _on_focus_finished(self, result):
         """展示结果，并刷新任务结束后的轴位置和伺服状态。"""
 
-        self.result_presenter.handle_finished(result)
-        self._submit_final_image_for_inspection(result)
+        is_early_continuous_result = (
+            self._continuous_best_frame_presented
+            and getattr(result, "quality", "") == "continuous_best_frame"
+        )
+        if is_early_continuous_result:
+            self.result_presenter.complete_continuous_return(result)
+        else:
+            self.result_presenter.handle_finished(result)
+            self._submit_final_image_for_inspection(result)
+        self._continuous_best_frame_presented = False
         if self.motion_service.backend is not None:
             self.motion_service.refresh_state()
+
+    def _on_best_frame_ready(self, event):
+        """最佳帧确定后立即显示并提交检测；轴仍由任务线程回起点。"""
+
+        self._continuous_best_frame_presented = True
+        self.result_presenter.present_best_frame_ready(event)
+        self._submit_image_for_inspection(getattr(event, "image", None))
 
     def _submit_final_image_for_inspection(self, result):
         """将成功搜索得到的最终图旁路提交给独立检测服务。"""
@@ -434,12 +454,17 @@ class MainWindow(QMainWindow):
             return
 
         final_image = getattr(result, "final_image", None)
-        if final_image is None:
+        self._submit_image_for_inspection(final_image)
+
+    def _submit_image_for_inspection(self, image):
+        """将已确定的原始最佳图提交给独立检测服务。"""
+
+        if image is None:
             return
 
         try:
             task_id = self.inspection_service.submit_image(
-                final_image,
+                image,
                 self.inspection_config,
             )
         except (TypeError, ValueError) as error:
@@ -724,6 +749,7 @@ class MainWindow(QMainWindow):
         """展示后台异常，并刷新运动控制器安全状态。"""
 
         self.result_presenter.handle_error(error_text)
+        self._continuous_best_frame_presented = False
         if self.motion_service.backend is not None:
             self.motion_service.refresh_state()
 

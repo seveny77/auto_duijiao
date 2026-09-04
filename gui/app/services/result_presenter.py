@@ -119,6 +119,42 @@ class ResultPresenter:
         self._message_fn(f"[错误] 后台任务异常: {message}")
         self._status_fn("后台任务异常")
 
+    def present_best_frame_ready(self, event):
+        """在轴回位前立即显示连续精扫已确定的最佳帧。"""
+
+        focus_ms = float(
+            getattr(event, "focus_ct_ms", {}).get("focus_total_ms", 0.0)
+        )
+        self._message_fn(
+            "连续精扫最佳帧已确定："
+            f"index={getattr(event, 'best_index', -1)}，"
+            f"清晰度={getattr(event, 'best_score', 0.0):.3f}，"
+            f"对焦 CT={focus_ms:.1f}ms；轴正在回起点"
+        )
+        image = getattr(event, "image", None)
+        if image is not None:
+            self._show_image(
+                image,
+                f"连续精扫最佳帧 index={getattr(event, 'best_index', -1)}",
+            )
+        self._status_fn("最佳帧已确定，轴正在回扫描起点")
+
+    def complete_continuous_return(self, result):
+        """处理提前发布最佳帧后的回位终态，不重复显示或提交图像。"""
+
+        if result.rc != 0:
+            self.handle_finished(result)
+            return
+
+        self._controller.set_state(self._controller.STATE_DONE)
+        return_ms = float(result.ct_ms.get("return_to_start_ms", 0.0))
+        self._message_fn(
+            "连续精扫轴已回到起点："
+            f"{result.final_position_um:g}µm，"
+            f"回位 CT={return_ms:.1f}ms"
+        )
+        self._status_fn("连续精扫完成，已回到扫描起点")
+
     def present(self, result):
         """根据结果类型选择对应的展示方法。"""
 

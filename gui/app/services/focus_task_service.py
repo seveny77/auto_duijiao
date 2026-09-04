@@ -28,6 +28,9 @@ class FocusTaskService(QObject):
         float,
     )
 
+    # 最佳帧已确定、但轴回位尚未完成。
+    best_frame_ready = pyqtSignal(object)
+
     # 搜索或标定正常返回的结果对象。
     finished = pyqtSignal(object)
 
@@ -71,6 +74,11 @@ class FocusTaskService(QObject):
 
         worker.preview.connect(
             self._on_preview,
+            Qt.QueuedConnection,
+        )
+
+        worker.best_frame_ready.connect(
+            self._on_best_frame_ready,
             Qt.QueuedConnection,
         )
 
@@ -183,6 +191,14 @@ class FocusTaskService(QObject):
             sequence,
             score,
         )
+
+    def _on_best_frame_ready(self, event):
+        """把最佳帧提前结果转发给 GUI。"""
+
+        if self.sender() is not self._worker:
+            return
+
+        self.best_frame_ready.emit(event)
 
     def _on_finished(self, result):
         """把Worker正常结果继续转发给GUI。"""

@@ -33,6 +33,7 @@ from backend.config import FocusConfig
 from backend.detection import detect_roi
 from backend.direct_fine import SoftwareBestFrameCollector
 from backend.result import (
+    BestFrameReady,
     CalibrateResult,
     SearchResult,
 )
@@ -418,6 +419,28 @@ def _run_continuous_search(cfg) -> SearchResult:
         ct["focus_total_ms"] = (
             focus_end_t0 - total_t0
         ) * 1000
+
+        # 最佳帧已经确定，可以立刻交给 GUI 显示和独立检测。
+        # 回起点仍由当前对焦线程串行执行，避免两个线程并发操作轴卡。
+        ready_callback = cfg.best_frame_ready_callback
+        if ready_callback is not None:
+            try:
+                ready_callback(
+                    BestFrameReady(
+                        image=best.best_image,
+                        best_index=best.best_index,
+                        best_score=best.best_score,
+                        evaluation_roi=best.evaluation_roi_local,
+                        focus_ct_ms=dict(ct),
+                        scan_end_position_um=(
+                            float(motion_result.actual_end_um)
+                        ),
+                        return_target_um=float(search_start),
+                    )
+                )
+            except Exception:
+                # GUI 通知失败不能中断轴回位；完整异常只写日志。
+                logger.exception("连续精扫最佳帧就绪通知失败")
 
         return_t0 = time.perf_counter()
         motion.move_to_position(

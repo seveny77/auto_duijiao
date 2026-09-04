@@ -24,6 +24,9 @@ class VerifyWorker(QObject):
         float,
     )
 
+    # 最佳帧已确定、轴正在回起点时的提前结果。
+    best_frame_ready = pyqtSignal(object)
+
     # 后台流程正常结束，传递结果对象。
     finished = pyqtSignal(object)
 
@@ -63,6 +66,9 @@ class VerifyWorker(QObject):
         # 后端不需要导入 PyQt，也不需要知道 MainWindow。
         config.preview_callback = (
             self.preview.emit
+        )
+        config.best_frame_ready_callback = (
+            self.best_frame_ready.emit
         )
 
         try:
@@ -110,6 +116,7 @@ class VerifyWorker(QObject):
         finally:
             # 先解除后端配置对 Qt 预览信号的引用。
             config.preview_callback = None
+            config.best_frame_ready_callback = None
 
             # 最后通知 GUI：
             # 本次后台任务已经执行完最终清理。

@@ -8,6 +8,19 @@ from backend.focus_roi import EvaluationRoi
 
 
 @dataclass
+class BestFrameReady:
+    """连续精扫已确定最佳帧、但轴仍在回起点时发布的事件。"""
+
+    image: Optional[object] = None
+    best_index: int = -1
+    best_score: float = 0.0
+    evaluation_roi: Optional[EvaluationRoi] = None
+    focus_ct_ms: dict = field(default_factory=dict)
+    scan_end_position_um: float = 0.0
+    return_target_um: float = 0.0
+
+
+@dataclass
 class SearchResult:
     rc: int = 0
     action: str = "search"
