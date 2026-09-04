@@ -455,7 +455,7 @@ class ParamPanel(QWidget):
             self.soft_trigger_timeout_spin,
         )
         form.addRow(
-            "保存图片目录:",
+            "最终图保存目录:",
             self.save_edit,
         )
         form.addRow(

@@ -2,6 +2,7 @@ import glob
 import logging
 import os
 import time
+from datetime import datetime
 from typing import (
     Dict,
     List,
@@ -45,6 +46,29 @@ from focus_template import FocusTemplate
 
 
 logger = logging.getLogger(__name__)
+
+
+def save_timestamped_final_image(image, output_dir: Optional[str]) -> Optional[str]:
+    """保存未绘制标注的最终原图，返回成功写入的指定路径。
+
+    时间戳含微秒，连续任务在同一秒完成时也不会互相覆盖。保存失败只记录
+    日志，不影响已经完成的对焦与后续检测。
+    """
+
+    if image is None or not output_dir:
+        return None
+
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        filename = datetime.now().strftime("%Y%m%d_%H%M%S_%f.jpg")
+        path = os.path.join(output_dir, filename)
+        save_jpg(image, path)
+    except (OSError, cv2.error):
+        logger.exception("最终图保存失败: directory=%s", output_dir)
+        return None
+
+    logger.info("最终原图已保存: %s", path)
+    return path
 
 
 def build_sim_scores(n: int, start_um: int, step_um: int, peak_um: float,
@@ -419,6 +443,7 @@ def _run_continuous_search(cfg) -> SearchResult:
         ct["focus_total_ms"] = (
             focus_end_t0 - total_t0
         ) * 1000
+        final_image = best.best_image
 
         # 最佳帧已经确定，可以立刻交给 GUI 显示和独立检测。
         # 回起点仍由当前对焦线程串行执行，避免两个线程并发操作轴卡。
@@ -427,7 +452,7 @@ def _run_continuous_search(cfg) -> SearchResult:
             try:
                 ready_callback(
                     BestFrameReady(
-                        image=best.best_image,
+                        image=final_image,
                         best_index=best.best_index,
                         best_score=best.best_score,
                         evaluation_roi=best.evaluation_roi_local,
@@ -442,6 +467,9 @@ def _run_continuous_search(cfg) -> SearchResult:
                 # GUI 通知失败不能中断轴回位；完整异常只写日志。
                 logger.exception("连续精扫最佳帧就绪通知失败")
 
+        # 保存原始最佳图不依赖轴回位成功；此时 GUI 与检测已可并行处理该图。
+        save_timestamped_final_image(final_image, cfg.save_dir)
+
         return_t0 = time.perf_counter()
         motion.move_to_position(
             search_start,
@@ -454,20 +482,6 @@ def _run_continuous_search(cfg) -> SearchResult:
         ct["total_with_return_ms"] = (
             time.perf_counter() - total_t0
         ) * 1000
-
-        final_image = best.best_image
-        if final_image is not None and cfg.save_dir:
-            os.makedirs(cfg.save_dir, exist_ok=True)
-            save_jpg(
-                final_image,
-                os.path.join(cfg.save_dir, "continuous_best.jpg"),
-            )
-        if final_image is not None and cfg.save_images:
-            os.makedirs(cfg.save_images, exist_ok=True)
-            save_jpg(
-                final_image,
-                os.path.join(cfg.save_images, "continuous_best.jpg"),
-            )
 
         logger.info(
             "连续精扫完成：帧数=%d，最佳帧=%d，清晰度=%.3f，"

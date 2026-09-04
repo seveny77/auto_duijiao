@@ -211,6 +211,9 @@ class MainWindow(QMainWindow):
         self.inspection_panel.model_load_requested.connect(
             self._on_inspection_model_load
         )
+        self.inspection_panel.focus_start_requested.connect(
+            self._on_start_focus_from_inspection
+        )
         self.inspection_panel.offline_image_test_requested.connect(
             self._on_offline_inspection_image
         )
@@ -292,7 +295,7 @@ class MainWindow(QMainWindow):
             lambda _checked=False: self.result_presenter.load_template()
         )
         self.param_panel.start_btn.clicked.connect(
-            lambda _checked=False: self.focus_run_service.start()
+            lambda _checked=False: self._start_focus_task()
         )
         self.image_widget.live_btn.clicked.connect(self._on_toggle_live_view)
         self.param_panel.stop_btn.clicked.connect(self.controller.request_cancel) #停止
@@ -336,6 +339,21 @@ class MainWindow(QMainWindow):
 
         if not accepted:
             self._log("[检测] 当前无法提交模型加载请求")
+
+    def _on_start_focus_from_inspection(self):
+        """检测页的快捷按钮：复用对焦过程页既有的启动与校验逻辑。"""
+
+        self._start_focus_task()
+
+    def _start_focus_task(self):
+        """从任一页面启动对焦，并同步管理检测页快捷按钮状态。"""
+
+        if self.focus_task_service.is_running:
+            self.status_message.emit("对焦任务正在运行，请勿重复启动")
+            return
+
+        if self.focus_run_service.start():
+            self.inspection_panel.start_focus_btn.setEnabled(False)
 
     def _on_inspection_config_save(self, config: InspectionConfig):
         """校验并原子保存检测配置；失败时保留上一份有效配置。"""
@@ -435,6 +453,7 @@ class MainWindow(QMainWindow):
             self.result_presenter.handle_finished(result)
             self._submit_final_image_for_inspection(result)
         self._continuous_best_frame_presented = False
+        self.inspection_panel.start_focus_btn.setEnabled(True)
         if self.motion_service.backend is not None:
             self.motion_service.refresh_state()
 
@@ -750,6 +769,7 @@ class MainWindow(QMainWindow):
 
         self.result_presenter.handle_error(error_text)
         self._continuous_best_frame_presented = False
+        self.inspection_panel.start_focus_btn.setEnabled(True)
         if self.motion_service.backend is not None:
             self.motion_service.refresh_state()
 

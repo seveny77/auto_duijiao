@@ -239,10 +239,17 @@ class ConfigService:
         cfg.search_span_um = (
             self._panel.search_span_spin.value()
         )
-        cfg.save_images = (
-                self._panel.save_edit.text().strip()
-                or None
-        )
+        # 该目录只保存每次成功对焦的原始最佳图；相对路径以项目根目录
+        # 解析，确保从 PyCharm、快捷方式或命令行启动时位置都一致。
+        final_image_dir = self._panel.save_edit.text().strip()
+        if final_image_dir and not os.path.isabs(final_image_dir):
+            final_image_dir = os.path.join(
+                self._project_root,
+                final_image_dir,
+            )
+        cfg.save_dir = final_image_dir or None
+        # 旧 NCC 流程的“保存全部过程帧”字段保留，但新版连续精扫不使用它。
+        cfg.save_images = None
         cfg.calibrate_step_um = (
             self._panel.calibrate_step_spin.value()
         )

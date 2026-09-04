@@ -63,6 +63,7 @@ class InspectionPanel(QWidget):
     circle_confirmation_requested = pyqtSignal(object)
     original_image_saved = pyqtSignal(str)
     original_image_save_failed = pyqtSignal(str)
+    focus_start_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -88,6 +89,7 @@ class InspectionPanel(QWidget):
 
         self.select_model_btn.clicked.connect(self._choose_model)
         self.load_model_btn.clicked.connect(self._request_model_load)
+        self.start_focus_btn.clicked.connect(self.focus_start_requested.emit)
         self.select_local_image_btn.clicked.connect(self._choose_offline_image)
         self.display_mode_combo.currentIndexChanged.connect(
             self._refresh_result_image
@@ -131,6 +133,11 @@ class InspectionPanel(QWidget):
         header.addWidget(title)
         header.addWidget(subtitle)
         header.addStretch(1)
+        self.start_focus_btn = QPushButton("开始执行对焦")
+        self.start_focus_btn.setToolTip(
+            "使用“对焦过程”页中当前配置启动一次连续精扫对焦"
+        )
+        header.addWidget(self.start_focus_btn)
         header.addWidget(self.state_badge)
         root.addLayout(header)
 
