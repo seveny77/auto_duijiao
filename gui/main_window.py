@@ -258,6 +258,12 @@ class MainWindow(QMainWindow):
         self.inspection_service.inspection_finished.connect(
             self._on_inspection_finished
         )
+        self.inspection_service.inspection_image_saved.connect(
+            lambda task_id, path: self._log(f"[检测] {task_id} 结果图已保存: {path}")
+        )
+        self.inspection_service.inspection_image_save_failed.connect(
+            lambda task_id, message: self._log(f"[检测] {task_id} 结果图保存失败: {message}")
+        )
         self.inspection_service.image_inspection_visual_ready.connect(
             self._on_image_inspection_visual_ready
         )
@@ -326,10 +332,14 @@ class MainWindow(QMainWindow):
         """响应检测页的手动加载请求，实际加载交给后台服务。"""
 
         self.inspection_config.model_path = model_path
+        self.inspection_config.circle.model_path = (
+            self.inspection_panel.selected_circle_model_path
+        )
 
         try:
             accepted = self.inspection_service.load_model(
                 model_path,
+                self.inspection_config.circle.model_path,
                 self.inspection_config,
             )
         except RuntimeError as error:
@@ -385,6 +395,11 @@ class MainWindow(QMainWindow):
 
         self.inspection_panel.set_model_loaded(model_path, metadata)
         self._log(f"[检测] 语义分割模型已加载: {model_path}")
+        if isinstance(metadata, dict):
+            self._log(
+                "[检测] 找圆模型已加载并预热（最长边 1024）: "
+                f"{metadata.get('circle_model_path', '')}"
+            )
 
     def _on_inspection_model_load_failed(self, message: str):
         """把后台加载失败信息显示到检测页和底部日志。"""
@@ -421,7 +436,9 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            task_id = self.inspection_service.submit_image(image, config)
+            task_id = self.inspection_service.submit_image(
+                image, config, original_image_path=image_path,
+            )
         except (TypeError, ValueError) as error:
             self.status_message.emit("本地检测图片提交失败")
             self._log(f"[检测] 本地图片提交失败: {error}")
@@ -462,7 +479,10 @@ class MainWindow(QMainWindow):
 
         self._continuous_best_frame_presented = True
         self.result_presenter.present_best_frame_ready(event)
-        self._submit_image_for_inspection(getattr(event, "image", None))
+        self._submit_image_for_inspection(
+            getattr(event, "image", None),
+            original_image_path=getattr(event, "final_image_path", None),
+        )
 
     def _submit_final_image_for_inspection(self, result):
         """将成功搜索得到的最终图旁路提交给独立检测服务。"""
@@ -473,9 +493,12 @@ class MainWindow(QMainWindow):
             return
 
         final_image = getattr(result, "final_image", None)
-        self._submit_image_for_inspection(final_image)
+        self._submit_image_for_inspection(
+            final_image,
+            original_image_path=getattr(result, "final_image_path", None),
+        )
 
-    def _submit_image_for_inspection(self, image):
+    def _submit_image_for_inspection(self, image, *, original_image_path=None):
         """将已确定的原始最佳图提交给独立检测服务。"""
 
         if image is None:
@@ -485,6 +508,7 @@ class MainWindow(QMainWindow):
             task_id = self.inspection_service.submit_image(
                 image,
                 self.inspection_config,
+                original_image_path=original_image_path,
             )
         except (TypeError, ValueError) as error:
             self._log(f"[检测] 最终图提交失败: {error}")

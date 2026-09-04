@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """最终成像质检后台 Worker。"""
 
+import logging
 import time
 
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
 
+from backend.inspection_image_store import save_inspection_image
 from backend.inspection_roi import (
     build_circle_roi,
     crop_roi,
@@ -19,6 +21,9 @@ from backend.inspection_types import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class InspectionWorker(QObject):
     """在所属 QThread 中串行执行模型加载、推理、找圆和判定。"""
 
@@ -26,6 +31,8 @@ class InspectionWorker(QObject):
     model_load_failed = pyqtSignal(str)
     image_inspection_finished = pyqtSignal(str, object)
     inspection_finished = pyqtSignal(str, object)
+    inspection_image_saved = pyqtSignal(str, str)
+    inspection_image_save_failed = pyqtSignal(str, str)
     image_circle_redetection_finished = pyqtSignal(str, object)
     circle_redetection_finished = pyqtSignal(str, object)
     shutdown_complete = pyqtSignal()
@@ -33,17 +40,19 @@ class InspectionWorker(QObject):
     def __init__(
         self,
         segmentation_service,
+        circle_model_service,
         circle_detector,
         rule_engine,
     ):
         super().__init__()
         self._segmentation_service = segmentation_service
+        self._circle_model_service = circle_model_service
         self._circle_detector = circle_detector
         self._rule_engine = rule_engine
 
-    @pyqtSlot(str, object)
-    def load_model(self, model_path: str, config):
-        """在当前后台线程加载并预热唯一分割模型。"""
+    @pyqtSlot(str, str, object)
+    def load_model(self, model_path: str, circle_model_path: str, config):
+        """在当前后台线程加载并预热分割模型和专用找圆模型。"""
 
         try:
             self._segmentation_service.load(
@@ -51,10 +60,17 @@ class InspectionWorker(QObject):
                 imgsz=config.inference_imgsz,
                 confidence_floor=config.inference_confidence_floor,
             )
+            self._circle_model_service.load(
+                circle_model_path,
+                confidence_floor=config.circle.confidence_floor,
+            )
             metadata = {
                 "class_names": self._segmentation_service.class_names,
                 "load_ms": self._segmentation_service.load_ms,
                 "warmup_ms": self._segmentation_service.warmup_ms,
+                "circle_model_path": self._circle_model_service.model_path,
+                "circle_load_ms": self._circle_model_service.load_ms,
+                "circle_warmup_ms": self._circle_model_service.warmup_ms,
             }
             self.model_loaded.emit(
                 self._segmentation_service.model_path,
@@ -63,8 +79,8 @@ class InspectionWorker(QObject):
         except Exception as error:
             self.model_load_failed.emit(_error_message(error))
 
-    @pyqtSlot(str, object, object)
-    def inspect(self, task_id: str, image, config):
+    @pyqtSlot(str, object, object, object)
+    def inspect(self, task_id: str, image, config, original_image_path=None):
         """对整图找圆，逐 ROI 分割并输出多圆结果及旧 GUI 兼容结果。"""
 
         image_result, compatibility_result = self._inspect_image(
@@ -72,12 +88,26 @@ class InspectionWorker(QObject):
             image,
             config,
         )
+        self._save_result_image(task_id, image, image_result, config, original_image_path)
         # 先发送完整多圆结果；旧信号继续服务当前单圆 GUI。
         self.image_inspection_finished.emit(task_id, image_result)
         self.inspection_finished.emit(task_id, compatibility_result)
 
-    @pyqtSlot(str, object, object, object)
-    def redetect_circle(self, task_id: str, image, source_result, config):
+    def _save_result_image(self, task_id, image, image_result, config, original_image_path):
+        if original_image_path:
+            # 绘制和编码在检测线程完成，不受 GUI 缩放、选中圆或显示开关影响。
+            # 保存失败只报告文件错误，仍正常发布本次检测结果。
+            try:
+                output_path = save_inspection_image(
+                    image, image_result, config, original_image_path,
+                )
+            except Exception as error:
+                logger.exception("检测结果图保存失败: task=%s", task_id)
+                self.inspection_image_save_failed.emit(task_id, _error_message(error))
+            else:
+                self.inspection_image_saved.emit(task_id, output_path)
+    @pyqtSlot(str, object, object, object, object)
+    def redetect_circle(self, task_id: str, image, source_result, config, original_image_path=None):
         """重新找圆后按新 ROI 重跑分割，避免复用已经错位的局部结果。"""
 
         del source_result
@@ -92,6 +122,7 @@ class InspectionWorker(QObject):
         compatibility_result.timings_ms["circle_redetection_total"] = (
             compatibility_result.timings_ms.get("total", 0.0)
         )
+        self._save_result_image(task_id, image, image_result, config, original_image_path)
         self.image_circle_redetection_finished.emit(task_id, image_result)
         self.circle_redetection_finished.emit(task_id, compatibility_result)
 
@@ -160,7 +191,7 @@ class InspectionWorker(QObject):
                 circle_id=circle_id,
                 circle_candidate=candidate,
                 circle_confirmed=(
-                    candidate.score >= config.circle.min_candidate_score
+                    candidate.score >= config.circle.confidence_floor
                 ),
             )
             try:
@@ -263,6 +294,7 @@ class InspectionWorker(QObject):
 
         try:
             self._segmentation_service.unload_for_shutdown()
+            self._circle_model_service.unload_for_shutdown()
         finally:
             self.shutdown_complete.emit()
 

@@ -88,6 +88,7 @@ class InspectionPanel(QWidget):
         self._apply_style()
 
         self.select_model_btn.clicked.connect(self._choose_model)
+        self.select_circle_model_btn.clicked.connect(self._choose_circle_model)
         self.load_model_btn.clicked.connect(self._request_model_load)
         self.start_focus_btn.clicked.connect(self.focus_start_requested.emit)
         self.select_local_image_btn.clicked.connect(self._choose_offline_image)
@@ -364,29 +365,40 @@ class InspectionPanel(QWidget):
         return scroll
 
     def _build_model_group(self) -> QGroupBox:
-        group = QGroupBox("1. 分割模型")
+        group = QGroupBox("1. 检测模型")
         layout = QVBoxLayout(group)
+        layout.addWidget(QLabel("缺陷分割模型（YOLO-Seg）："))
         self.model_path_edit = QLineEdit()
         self.model_path_edit.setReadOnly(True)
         self.model_path_edit.setPlaceholderText("请选择 YOLO-Seg best.pt")
         layout.addWidget(self.model_path_edit)
 
         buttons = QHBoxLayout()
-        self.select_model_btn = QPushButton("选择模型…")
-        self.load_model_btn = QPushButton("加载模型")
+        self.select_model_btn = QPushButton("选择分割模型…")
+        self.load_model_btn = QPushButton("加载并预热模型")
         buttons.addWidget(self.select_model_btn)
         buttons.addWidget(self.load_model_btn)
         layout.addLayout(buttons)
+
+        layout.addWidget(QLabel("端面找圆模型（YOLO Detect，最长边固定 1024）："))
+        self.circle_model_path_edit = QLineEdit()
+        self.circle_model_path_edit.setReadOnly(True)
+        self.circle_model_path_edit.setPlaceholderText("请选择普通 YOLO Detect best.pt")
+        layout.addWidget(self.circle_model_path_edit)
+        self.select_circle_model_btn = QPushButton("选择找圆模型…")
+        layout.addWidget(self.select_circle_model_btn)
 
         form = QFormLayout()
         self.model_status_label = QLabel("尚未加载")
         self.model_classes_label = QLabel("--")
         self.model_load_time_label = QLabel("--")
         self.model_warmup_time_label = QLabel("--")
+        self.circle_model_time_label = QLabel("--")
         form.addRow("状态：", self.model_status_label)
         form.addRow("类别：", self.model_classes_label)
         form.addRow("加载耗时：", self.model_load_time_label)
         form.addRow("预热耗时：", self.model_warmup_time_label)
+        form.addRow("找圆模型加载/预热：", self.circle_model_time_label)
         layout.addLayout(form)
         return group
 
@@ -396,11 +408,27 @@ class InspectionPanel(QWidget):
 
         return self.model_path_edit.text().strip()
 
+    @property
+    def selected_circle_model_path(self) -> str:
+        return self.circle_model_path_edit.text().strip()
+
     def set_model_path(self, path: str):
         """显示模型路径，并根据路径是否为空更新加载按钮。"""
 
         self.model_path_edit.setText(str(path or ""))
-        self.load_model_btn.setEnabled(bool(str(path or "").strip()))
+        self.load_model_btn.setEnabled(
+            bool(str(path or "").strip())
+            and bool(self.selected_circle_model_path)
+        )
+
+    def set_circle_model_path(self, path: str):
+        """显示专用找圆模型路径。"""
+
+        self.circle_model_path_edit.setText(str(path or ""))
+        self.load_model_btn.setEnabled(
+            bool(self.selected_model_path)
+            and bool(str(path or "").strip())
+        )
 
     def set_inspection_config(self, config: InspectionConfig):
         """把检测配置完整映射到界面，但不触发检测或找圆。"""
@@ -409,9 +437,11 @@ class InspectionPanel(QWidget):
         try:
             self._base_inspection_config = copy.deepcopy(config)
             self.set_model_path(config.model_path)
+            self.set_circle_model_path(config.circle.model_path)
             self.mm_per_pixel_spin.setValue(float(config.mm_per_pixel))
-            self.min_radius_spin.setValue(int(config.circle.min_radius_px))
-            self.max_radius_spin.setValue(int(config.circle.max_radius_px))
+            self.circle_confidence_spin.setValue(
+                float(config.circle.confidence_floor)
+            )
             self.expected_circle_count_spin.setValue(
                 int(config.circle.expected_circle_count)
             )
@@ -464,9 +494,11 @@ class InspectionPanel(QWidget):
 
         config = copy.deepcopy(self._base_inspection_config)
         config.model_path = self.selected_model_path
+        config.circle.model_path = self.selected_circle_model_path
         config.mm_per_pixel = float(self.mm_per_pixel_spin.value())
-        config.circle.min_radius_px = int(self.min_radius_spin.value())
-        config.circle.max_radius_px = int(self.max_radius_spin.value())
+        config.circle.confidence_floor = float(
+            self.circle_confidence_spin.value()
+        )
         config.circle.expected_circle_count = int(
             self.expected_circle_count_spin.value()
         )
@@ -511,6 +543,7 @@ class InspectionPanel(QWidget):
         self.model_status_label.setText("正在加载…")
         self.state_badge.setText("加载中")
         self.select_model_btn.setEnabled(False)
+        self.select_circle_model_btn.setEnabled(False)
         self.load_model_btn.setEnabled(False)
 
     def set_model_loaded(self, path: str, metadata):
@@ -536,8 +569,14 @@ class InspectionPanel(QWidget):
         self.model_warmup_time_label.setText(
             _format_ms(metadata.get("warmup_ms")) if isinstance(metadata, dict) else "--"
         )
+        self.circle_model_time_label.setText(
+            f"{_format_ms(metadata.get('circle_load_ms'))} / "
+            f"{_format_ms(metadata.get('circle_warmup_ms'))}"
+            if isinstance(metadata, dict) else "--"
+        )
         self.state_badge.setText("模型已加载")
         self.select_model_btn.setEnabled(False)
+        self.select_circle_model_btn.setEnabled(False)
         self.load_model_btn.setEnabled(False)
 
     def set_model_load_failed(self, message: str):
@@ -547,9 +586,13 @@ class InspectionPanel(QWidget):
         self.model_classes_label.setText("--")
         self.model_load_time_label.setText("--")
         self.model_warmup_time_label.setText("--")
+        self.circle_model_time_label.setText("--")
         self.state_badge.setText("加载失败")
         self.select_model_btn.setEnabled(True)
-        self.load_model_btn.setEnabled(bool(self.selected_model_path))
+        self.select_circle_model_btn.setEnabled(True)
+        self.load_model_btn.setEnabled(
+            bool(self.selected_model_path) and bool(self.selected_circle_model_path)
+        )
         self.model_status_label.setToolTip(str(message))
 
     def _choose_model(self):
@@ -561,6 +604,16 @@ class InspectionPanel(QWidget):
         )
         if path:
             self.set_model_path(path)
+
+    def _choose_circle_model(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择端面找圆 YOLO Detect 模型",
+            self.selected_circle_model_path,
+            "PyTorch 模型 (*.pt);;所有文件 (*.*)",
+        )
+        if path:
+            self.set_circle_model_path(path)
 
     def _choose_offline_image(self):
         """选择一张本地图，并将路径和页面当前配置交给主窗口。"""
@@ -592,7 +645,7 @@ class InspectionPanel(QWidget):
 
     def _request_model_load(self):
         path = self.selected_model_path
-        if path:
+        if path and self.selected_circle_model_path:
             self.model_load_requested.emit(path)
 
     def _read_region_rows(self):
@@ -1387,30 +1440,26 @@ class InspectionPanel(QWidget):
         self._populate_rule_table(rules, results)
 
     def _build_circle_group(self) -> QGroupBox:
-        group = QGroupBox("2. 轮廓找圆")
+        group = QGroupBox("2. 深度学习找圆")
         layout = QFormLayout(group)
-        self.min_radius_spin = QSpinBox()
-        self.min_radius_spin.setRange(1, 100000)
-        self.min_radius_spin.setValue(1000)
-        self.min_radius_spin.setSuffix(" px")
-        self.max_radius_spin = QSpinBox()
-        self.max_radius_spin.setRange(1, 100000)
-        self.max_radius_spin.setValue(3000)
-        self.max_radius_spin.setSuffix(" px")
         self.expected_circle_count_spin = QSpinBox()
         self.expected_circle_count_spin.setRange(1, 20)
         self.expected_circle_count_spin.setValue(1)
+        self.circle_confidence_spin = QDoubleSpinBox()
+        self.circle_confidence_spin.setRange(0.0, 1.0)
+        self.circle_confidence_spin.setDecimals(3)
+        self.circle_confidence_spin.setSingleStep(0.05)
+        self.circle_confidence_spin.setValue(0.25)
         self.circle_candidate_combo = QComboBox()
         self.circle_candidate_combo.addItem("尚无候选圆")
         self.circle_candidate_combo.setEnabled(False)
         self.circle_candidate_combo.setToolTip(
-            "展示本次轮廓法找到并用于生成 ROI 的产品圆"
+            "展示本次 YOLO 找圆得到并用于生成 ROI 的产品圆"
         )
         self.find_circle_btn = QPushButton("重新找圆")
         self.confirm_circle_btn = QPushButton("确认当前圆心")
-        layout.addRow("最小半径：", self.min_radius_spin)
-        layout.addRow("最大半径：", self.max_radius_spin)
         layout.addRow("预期圆数量：", self.expected_circle_count_spin)
+        layout.addRow("最低置信度：", self.circle_confidence_spin)
         layout.addRow("候选圆：", self.circle_candidate_combo)
         layout.addRow(self.find_circle_btn)
         layout.addRow(self.confirm_circle_btn)

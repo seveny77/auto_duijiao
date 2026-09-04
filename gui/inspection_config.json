@@ -6,16 +6,9 @@
   "mm_per_pixel": 0.24,
   "history_root": "inspection_history",
   "circle": {
-    "downsample_factor": 4,
-    "blur_kernel_size": 7,
-    "hough_dp": 1.2,
-    "hough_param1": 100.0,
-    "hough_param2": 30.0,
-    "min_center_distance_px": 700.0,
-    "min_radius_px": 250,
-    "max_radius_px": 300,
-    "expected_circle_count": 5,
-    "min_candidate_score": 0.5
+    "model_path": "F:\\项目\\自动对焦\\code\\detect\\runs\\detect\\autofocus\\weights\\best.pt",
+    "confidence_floor": 0.25,
+    "expected_circle_count": 5
   },
   "region_rules": [
     {

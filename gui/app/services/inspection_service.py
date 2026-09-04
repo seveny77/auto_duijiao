@@ -2,10 +2,12 @@
 """最终成像质检任务的异步调度和生命周期服务。"""
 
 import copy
+import os
 
 from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
 
-from backend.circle_detection import ContourCircleDetector
+from backend.circle_detection import YoloCircleDetector
+from backend.circle_model_service import CircleModelService
 from backend.inspection_engine import InspectionRuleEngine
 from backend.inspection_types import InspectionResult
 from backend.segmentation_model_service import SegmentationModelService
@@ -34,19 +36,22 @@ class InspectionService(QObject):
     image_inspection_visual_ready = pyqtSignal(str, object, object, object)
     inspection_finished = pyqtSignal(str, object)
     inspection_visual_ready = pyqtSignal(str, object, object, object)
+    inspection_image_saved = pyqtSignal(str, str)
+    inspection_image_save_failed = pyqtSignal(str, str)
     circle_redetection_started = pyqtSignal(str)
     image_circle_redetection_finished = pyqtSignal(str, object)
     circle_redetection_finished = pyqtSignal(str, object)
     shutdown_ready = pyqtSignal()
 
-    _load_requested = pyqtSignal(str, object)
-    _inspection_requested = pyqtSignal(str, object, object)
-    _circle_redetection_requested = pyqtSignal(str, object, object, object)
+    _load_requested = pyqtSignal(str, str, object)
+    _inspection_requested = pyqtSignal(str, object, object, object)
+    _circle_redetection_requested = pyqtSignal(str, object, object, object, object)
     _shutdown_requested = pyqtSignal()
 
     def __init__(
         self,
         segmentation_service=None,
+        circle_model_service=None,
         circle_detector=None,
         rule_engine=None,
         parent=None,
@@ -64,12 +69,16 @@ class InspectionService(QObject):
         self._active_image_identity = None
         self._active_image = None
         self._active_config = None
+        self._active_original_image_path = None
+        self._last_completed_source = None
         self._pending_task = None
 
         self._thread = QThread(self)
+        circle_model_service = circle_model_service or CircleModelService()
         self._worker = InspectionWorker(
             segmentation_service or SegmentationModelService(),
-            circle_detector or ContourCircleDetector(),
+            circle_model_service,
+            circle_detector or YoloCircleDetector(circle_model_service),
             rule_engine or InspectionRuleEngine(),
         )
         self._worker.moveToThread(self._thread)
@@ -105,6 +114,12 @@ class InspectionService(QObject):
         self._worker.inspection_finished.connect(
             self._on_inspection_finished,
             Qt.QueuedConnection,
+        )
+        self._worker.inspection_image_saved.connect(
+            self.inspection_image_saved, Qt.QueuedConnection,
+        )
+        self._worker.inspection_image_save_failed.connect(
+            self.inspection_image_save_failed, Qt.QueuedConnection,
         )
         self._worker.image_circle_redetection_finished.connect(
             self._on_image_circle_redetection_finished,
@@ -149,8 +164,8 @@ class InspectionService(QObject):
     def is_shutdown_complete(self) -> bool:
         return self._shutdown_complete
 
-    def load_model(self, model_path: str, config) -> bool:
-        """异步提交唯一模型加载请求。"""
+    def load_model(self, model_path: str, circle_model_path: str, config) -> bool:
+        """异步加载分割模型与找圆模型，并在后台线程完成各自预热。"""
 
         if self._shutting_down:
             return False
@@ -162,11 +177,13 @@ class InspectionService(QObject):
         config_snapshot = copy.deepcopy(config)
         self._set_state(InspectionState.LOADING)
         self.model_loading.emit(str(model_path))
-        self._load_requested.emit(str(model_path), config_snapshot)
+        self._load_requested.emit(
+            str(model_path), str(circle_model_path), config_snapshot
+        )
         return True
 
-    def submit_image(self, image, config) -> str:
-        """提交最终图；忙碌或模型未加载时只保留最新一张。"""
+    def submit_image(self, image, config, *, original_image_path=None) -> str:
+        """提交最终图及配对路径；忙碌或模型未加载时只保留最新一张。"""
 
         if self._shutting_down:
             return ""
@@ -188,6 +205,7 @@ class InspectionService(QObject):
             image,
             copy.deepcopy(config),
             image_identity,
+            os.path.abspath(original_image_path) if original_image_path else None,
         )
         if not self._model_ready or self._state != InspectionState.READY:
             self._pending_task = task
@@ -232,6 +250,12 @@ class InspectionService(QObject):
             image,
             source_result,
             config_snapshot,
+            (
+                self._last_completed_source[1]
+                if self._last_completed_source is not None
+                and self._last_completed_source[0] == str(task_id)
+                else None
+            ),
         )
         return True
 
@@ -254,16 +278,19 @@ class InspectionService(QObject):
         return f"inspection-{self._task_sequence:06d}"
 
     def _start_task(self, task):
-        task_id, image, config_snapshot, image_identity = task
+        task_id, image, config_snapshot, image_identity, original_image_path = task
         self._pending_task = None
         self._active_operation = "inspection"
         self._active_task_id = task_id
         self._active_image_identity = image_identity
         self._active_image = image
         self._active_config = config_snapshot
+        self._active_original_image_path = original_image_path
         self._set_state(InspectionState.RUNNING)
         self.inspection_started.emit(task_id)
-        self._inspection_requested.emit(task_id, image, config_snapshot)
+        self._inspection_requested.emit(
+            task_id, image, config_snapshot, original_image_path,
+        )
 
     def _set_state(self, state: str):
         if self._state == state:
@@ -305,6 +332,7 @@ class InspectionService(QObject):
 
         completed_image = self._active_image
         completed_config = self._active_config
+        self._last_completed_source = (task_id, self._active_original_image_path)
         self._clear_active_operation()
         self.inspection_finished.emit(task_id, result)
         self.inspection_visual_ready.emit(
@@ -377,6 +405,7 @@ class InspectionService(QObject):
         self._active_image_identity = None
         self._active_image = None
         self._active_config = None
+        self._active_original_image_path = None
 
     def _request_worker_shutdown(self):
         if self._shutdown_signal_sent:

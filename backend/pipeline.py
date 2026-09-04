@@ -48,20 +48,38 @@ from focus_template import FocusTemplate
 logger = logging.getLogger(__name__)
 
 
-def save_timestamped_final_image(image, output_dir: Optional[str]) -> Optional[str]:
+def _timestamped_final_image_path(output_dir: Optional[str]) -> Optional[str]:
+    """只预定原图的绝对路径，不等待目录创建或图像编码。"""
+
+    if not output_dir:
+        return None
+    filename = datetime.now().strftime("%Y%m%d_%H%M%S_%f.jpg")
+    return os.path.abspath(os.path.join(output_dir, filename))
+
+
+def save_timestamped_final_image(
+    image,
+    output_dir: Optional[str],
+    *,
+    output_path: Optional[str] = None,
+) -> Optional[str]:
     """保存未绘制标注的最终原图，返回成功写入的指定路径。
 
     时间戳含微秒，连续任务在同一秒完成时也不会互相覆盖。保存失败只记录
-    日志，不影响已经完成的对焦与后续检测。
+    日志，不影响已经完成的对焦与后续检测。output_path 可复用最佳帧事件
+    中预定的路径，避免异步检测结果与原图各自产生不同时间戳。
     """
 
     if image is None or not output_dir:
         return None
 
     try:
-        os.makedirs(output_dir, exist_ok=True)
-        filename = datetime.now().strftime("%Y%m%d_%H%M%S_%f.jpg")
-        path = os.path.join(output_dir, filename)
+        path = (
+            os.path.abspath(output_path)
+            if output_path is not None
+            else _timestamped_final_image_path(output_dir)
+        )
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         save_jpg(image, path)
     except (OSError, cv2.error):
         logger.exception("最终图保存失败: directory=%s", output_dir)
@@ -320,6 +338,7 @@ def _run_continuous_search(cfg) -> SearchResult:
     cam = None
     collector = None
     borrowed_camera = False
+    final_image_path = None
     ct = {}
     total_t0 = time.perf_counter()
 
@@ -444,6 +463,7 @@ def _run_continuous_search(cfg) -> SearchResult:
             focus_end_t0 - total_t0
         ) * 1000
         final_image = best.best_image
+        final_image_path = _timestamped_final_image_path(cfg.save_dir)
 
         # 最佳帧已经确定，可以立刻交给 GUI 显示和独立检测。
         # 回起点仍由当前对焦线程串行执行，避免两个线程并发操作轴卡。
@@ -461,6 +481,7 @@ def _run_continuous_search(cfg) -> SearchResult:
                             float(motion_result.actual_end_um)
                         ),
                         return_target_um=float(search_start),
+                        final_image_path=final_image_path,
                     )
                 )
             except Exception:
@@ -468,7 +489,11 @@ def _run_continuous_search(cfg) -> SearchResult:
                 logger.exception("连续精扫最佳帧就绪通知失败")
 
         # 保存原始最佳图不依赖轴回位成功；此时 GUI 与检测已可并行处理该图。
-        save_timestamped_final_image(final_image, cfg.save_dir)
+        save_timestamped_final_image(
+            final_image,
+            cfg.save_dir,
+            output_path=final_image_path,
+        )
 
         return_t0 = time.perf_counter()
         motion.move_to_position(
@@ -502,6 +527,7 @@ def _run_continuous_search(cfg) -> SearchResult:
             final_position_um=float(search_start),
             fine_best_image=final_image,
             final_image=final_image,
+            final_image_path=final_image_path,
             coarse_points=[],
             fine_points=[],
             roi=None,
@@ -525,6 +551,7 @@ def _run_continuous_search(cfg) -> SearchResult:
             rc=1,
             action="search",
             error=message,
+            final_image_path=final_image_path,
             ct_ms=ct,
         )
     finally:
@@ -909,6 +936,7 @@ def _run_search_legacy(cfg) -> SearchResult:
 
         # ── ⑤ 最佳位置单点飞拍 ──
         final_img = None
+        final_image_path = None
         t0 = time.perf_counter()
         if col_f is not None:
             fine_stop_t0 = time.perf_counter()
@@ -980,7 +1008,10 @@ def _run_search_legacy(cfg) -> SearchResult:
             if final_col.processed >= 1:
                 final_img = final_col.image(0)
                 if cfg.save_dir and final_img is not None:
-                    save_jpg(final_img, os.path.join(cfg.save_dir, "final.jpg"))
+                    final_image_path = os.path.abspath(
+                        os.path.join(cfg.save_dir, "final.jpg")
+                    )
+                    save_jpg(final_img, final_image_path)
                 if cfg.save_images and final_img is not None:
                     save_jpg(final_img,
                              os.path.join(cfg.save_images, f"final_{final_position_um:.0f}um.jpg"))
@@ -1060,6 +1091,7 @@ def _run_search_legacy(cfg) -> SearchResult:
             final_position_um=final_position_um,
             fine_best_image=col_f.image(best_f) if col_f is not None else None,
             final_image=final_img,
+            final_image_path=final_image_path,
             coarse_points=pred.coarse_points,
             fine_points=list(zip(fine_positions, fine_scores)),
             roi=roi, roi_src=roi_src, detect_box=detect_box,

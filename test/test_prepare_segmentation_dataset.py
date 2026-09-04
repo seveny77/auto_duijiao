@@ -2,8 +2,10 @@
 """LabelMe 随机转换 YOLO-Seg 数据集测试。"""
 
 import json
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 import cv2
@@ -112,6 +114,44 @@ class PrepareSegmentationDatasetTest(unittest.TestCase):
             empty_label = output / "labels" / split / "image_01.txt"
             self.assertTrue(empty_label.is_file())
             self.assertEqual(empty_label.read_text(encoding="utf-8"), "")
+
+
+    def test_invalid_polygon_skips_whole_sample_and_updates_summary(self):
+        for points in ([], [[10, 10]], [[10, 10], [30, 30]], None):
+            with self.subTest(points=points), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = self._create_source(root, count=10)
+                annotation = source / "label" / "image_00.json"
+                payload = json.loads(annotation.read_text(encoding="utf-8"))
+                # 前面有合法轮廓时，也必须跳过整张图片。
+                payload["shapes"].append({
+                    "label": "异物",
+                    "shape_type": "polygon",
+                    "points": points,
+                })
+                original = json.dumps(payload, ensure_ascii=False)
+                annotation.write_text(original, encoding="utf-8")
+                output = root / "converted"
+                messages = io.StringIO()
+                with redirect_stderr(messages):
+                    summary = prepare_dataset(source, output)
+
+                self.assertEqual(summary["source_image_count"], 10)
+                self.assertEqual(summary["image_count"], 9)
+                self.assertEqual(summary["skipped_image_count"], 1)
+                self.assertEqual(sum(summary["split_counts"].values()), 9)
+                self.assertEqual(summary["class_counts"], {"异物": 4, "脏污": 5})
+                self.assertIn("shapes[1] 少于3个点", messages.getvalue())
+                self.assertEqual(summary["skipped_samples"][0]["annotation"], annotation.name)
+                self.assertEqual(annotation.read_text(encoding="utf-8"), original)
+                self.assertTrue((source / "img" / "image_00.jpg").is_file())
+                self.assertEqual(list(output.rglob("image_00.*")), [])
+                self.assertEqual(len(list((output / "images").rglob("*.jpg"))), 9)
+                self.assertEqual(len(list((output / "labels").rglob("*.txt"))), 9)
+                manifest = json.loads((output / "split_manifest.json").read_text(encoding="utf-8"))
+                self.assertNotIn("image_00", manifest["assignments"])
+                saved_summary = json.loads((output / "dataset_summary.json").read_text(encoding="utf-8"))
+                self.assertEqual(saved_summary, summary)
 
 
 if __name__ == "__main__":

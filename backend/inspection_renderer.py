@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""将质检结果绘制为只含轮廓线的 BGR 图像。"""
+"""将质检结果绘制为带缺陷轮廓和文字标签的 BGR 图像。"""
+
+from functools import lru_cache
+import os
 
 import cv2
 import numpy as np
@@ -35,7 +38,7 @@ def render_inspection_overlay(
     line_width = max(1, round(min(width, height) / 1000))
 
     if show_contours:
-        _draw_instance_contours(canvas, result, line_width)
+        _draw_instance_contours(canvas, result, config, line_width)
 
     selected_circle = _selected_circle(result)
     if selected_circle is not None:
@@ -87,6 +90,7 @@ def render_image_inspection_overlay(
             _draw_instances(
                 canvas,
                 getattr(circle_result, "instances", []) or [],
+                config,
                 line_width,
             )
 
@@ -115,16 +119,20 @@ def _prepare_canvas(image, background: str):
     raise ValueError(f"不支持的绘图背景: {background}")
 
 
-def _draw_instance_contours(canvas, result, line_width: int):
+def _draw_instance_contours(canvas, result, config, line_width: int):
     _draw_instances(
         canvas,
         getattr(result, "instances", []) or [],
+        config,
         line_width,
     )
 
 
-def _draw_instances(canvas, instances, line_width: int):
+def _draw_instances(canvas, instances, config, line_width: int):
+    """画红色轮廓，并为每个有效实例添加类别和物理面积标签。"""
+
     height, width = canvas.shape[:2]
+    labels = []
     for instance in instances:
         points = _polygon_points(
             getattr(instance, "polygon", []),
@@ -143,6 +151,110 @@ def _draw_instances(canvas, instances, line_width: int):
             thickness=line_width,
             lineType=cv2.LINE_AA,
         )
+        labels.append((instance, points))
+
+    _draw_instance_labels(canvas, labels, config, line_width)
+
+
+def _draw_instance_labels(canvas, labels, config, line_width: int):
+    """使用 Windows 中文字体绘制 ``脏污 2.23um²`` 一类标签。"""
+
+    if not labels:
+        return
+
+    # inspection_config 的字段名沿用历史 mm_per_pixel，但 GUI 当前单位
+    # 明确为 um/px，故面积换算为 pixel_area × (um/px)^2，即 um²。
+    um_per_pixel = float(getattr(config, "mm_per_pixel", 0.0) or 0.0)
+    if not np.isfinite(um_per_pixel) or um_per_pixel <= 0:
+        return
+
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        # Pillow 是 Ultralytics 的正常依赖；缺失时宁可保留轮廓，也不要让
+        # 检测结果页面因绘制文字失败。
+        return
+
+    height, width = canvas.shape[:2]
+    font_size = max(16, min(36, int(round(min(width, height) / 100))))
+    font = _load_chinese_font(font_size)
+    if font is None:
+        return
+
+    pil_image = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_image)
+    padding = max(3, line_width + 1)
+    gap = max(4, line_width * 2)
+
+    for instance, points in labels:
+        label = _instance_label(instance, points, um_per_pixel)
+        if not label:
+            continue
+
+        left = int(points[:, 0, 0].min())
+        top = int(points[:, 0, 1].min())
+        right = int(points[:, 0, 0].max())
+        bottom = int(points[:, 0, 1].max())
+        text_box = draw.textbbox((0, 0), label, font=font)
+        text_width = text_box[2] - text_box[0]
+        text_height = text_box[3] - text_box[1]
+        x = min(max(0, left), max(0, width - text_width - padding * 2))
+        y = top - text_height - padding * 2 - gap
+        if y < 0:
+            y = min(height - text_height - padding * 2, bottom + gap)
+
+        draw.rounded_rectangle(
+            (
+                x,
+                y,
+                x + text_width + padding * 2,
+                y + text_height + padding * 2,
+            ),
+            radius=padding,
+            fill=(20, 20, 20),
+        )
+        draw.text(
+            (x + padding, y + padding - text_box[1]),
+            label,
+            font=font,
+            fill=(255, 255, 255),
+        )
+
+    canvas[:, :] = cv2.cvtColor(np.asarray(pil_image), cv2.COLOR_RGB2BGR)
+
+
+def _instance_label(instance, points, um_per_pixel: float) -> str:
+    """由实例类别、像素面积和当前标定比例构造面向操作者的标签。"""
+
+    class_name = str(getattr(instance, "class_name", "") or "").strip()
+    if not class_name:
+        class_name = f"类别 {int(getattr(instance, 'class_id', -1))}"
+
+    pixel_area = float(getattr(instance, "pixel_area", 0) or 0)
+    if not np.isfinite(pixel_area) or pixel_area <= 0:
+        pixel_area = float(cv2.contourArea(points))
+    area_um2 = max(0.0, pixel_area) * um_per_pixel * um_per_pixel
+    return f"{class_name} {area_um2:.2f}um²"
+
+
+@lru_cache(maxsize=8)
+def _load_chinese_font(font_size: int):
+    """优先使用 Windows 中文字体；避免每个缺陷标签重复加载字体文件。"""
+
+    try:
+        from PIL import ImageFont
+    except ImportError:
+        return None
+
+    candidates = (
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\msyhbd.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+    )
+    for path in candidates:
+        if os.path.isfile(path):
+            return ImageFont.truetype(path, font_size)
+    return None
 
 
 def _draw_roi(canvas, roi, line_width: int):

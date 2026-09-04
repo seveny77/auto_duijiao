@@ -15,20 +15,11 @@ from backend.inspection_types import (
 
 @dataclass
 class CircleDetectionConfig:
-    """自动找圆算法的可调参数。"""
+    """专用 YOLO Detect 找圆模型的配置。"""
 
-    downsample_factor: int = 4
-    blur_kernel_size: int = 9
-    # 仅为兼容既有 inspection_config.json 保留；轮廓找圆运行时不读取。
-    # 后续配置版本迁移时再统一删除，避免本次算法切换破坏旧配置读取。
-    hough_dp: float = 1.2
-    hough_param1: float = 100.0
-    hough_param2: float = 30.0
-    min_center_distance_px: float = 100.0
-    min_radius_px: int = 100
-    max_radius_px: int = 2000
+    model_path: str = ""
+    confidence_floor: float = 0.25
     expected_circle_count: int = 1
-    min_candidate_score: float = 0.50
 
 
 @dataclass
@@ -157,34 +148,18 @@ def inspection_config_from_dict(payload: dict[str, Any]) -> InspectionConfig:
 
     circle_defaults = CircleDetectionConfig()
     circle = CircleDetectionConfig(
-        downsample_factor=int(circle_payload.get(
-            "downsample_factor", circle_defaults.downsample_factor
+        model_path=str(circle_payload.get(
+            "model_path", circle_defaults.model_path
         )),
-        blur_kernel_size=int(circle_payload.get(
-            "blur_kernel_size", circle_defaults.blur_kernel_size
-        )),
-        hough_dp=float(circle_payload.get("hough_dp", circle_defaults.hough_dp)),
-        hough_param1=float(circle_payload.get(
-            "hough_param1", circle_defaults.hough_param1
-        )),
-        hough_param2=float(circle_payload.get(
-            "hough_param2", circle_defaults.hough_param2
-        )),
-        min_center_distance_px=float(circle_payload.get(
-            "min_center_distance_px",
-            circle_defaults.min_center_distance_px,
-        )),
-        min_radius_px=int(circle_payload.get(
-            "min_radius_px", circle_defaults.min_radius_px
-        )),
-        max_radius_px=int(circle_payload.get(
-            "max_radius_px", circle_defaults.max_radius_px
+        # 旧配置的 min_candidate_score 等价迁移为 YOLO 置信度下限。
+        confidence_floor=float(circle_payload.get(
+            "confidence_floor",
+            circle_payload.get(
+                "min_candidate_score", circle_defaults.confidence_floor
+            ),
         )),
         expected_circle_count=int(circle_payload.get(
             "expected_circle_count", circle_defaults.expected_circle_count
-        )),
-        min_candidate_score=float(circle_payload.get(
-            "min_candidate_score", circle_defaults.min_candidate_score
         )),
     )
 
@@ -241,29 +216,17 @@ def _region_rule_from_dict(payload: dict[str, Any]) -> InspectionRegionRule:
 
 
 def _validate_circle_config(config: CircleDetectionConfig) -> list[str]:
-    """检查找圆参数的数值范围。"""
+    """检查专用 YOLO 找圆配置。"""
 
     errors = []
-    if config.downsample_factor < 1:
-        errors.append("找圆降采样倍数必须至少为 1")
-    if config.blur_kernel_size < 1 or config.blur_kernel_size % 2 == 0:
-        errors.append("找圆模糊核尺寸必须是正奇数")
-    if not math.isfinite(config.hough_dp) or config.hough_dp <= 0:
-        errors.append("Hough dp 必须大于 0")
-    if not math.isfinite(config.hough_param1) or config.hough_param1 <= 0:
-        errors.append("Hough param1 必须大于 0")
-    if not math.isfinite(config.hough_param2) or config.hough_param2 <= 0:
-        errors.append("Hough param2 必须大于 0")
-    if config.min_center_distance_px <= 0:
-        errors.append("候选圆心最小距离必须大于 0")
-    if config.min_radius_px < 0:
-        errors.append("候选圆最小半径不能小于 0")
-    if config.max_radius_px <= config.min_radius_px:
-        errors.append("候选圆最大半径必须大于最小半径")
+    if not str(config.model_path).strip():
+        errors.append("找圆模型路径不能为空")
     if config.expected_circle_count < 1:
         errors.append("预期圆数量必须至少为 1")
-    if not 0 <= config.min_candidate_score <= 1:
-        errors.append("候选圆最低评分必须在 0～1 之间")
+    if not math.isfinite(config.confidence_floor) or not (
+        0 <= config.confidence_floor <= 1
+    ):
+        errors.append("找圆置信度下限必须在 0～1 之间")
     return errors
 
 

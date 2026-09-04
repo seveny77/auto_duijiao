@@ -6,12 +6,17 @@ import json
 import math
 import random
 import shutil
+import sys
 from collections import Counter
 from pathlib import Path
 
 
 DEFAULT_CLASSES = ["异物", "脏污"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
+
+class InvalidPolygonError(ValueError):
+    """多边形缺少有效的点列表，所在样本应整体跳过。"""
 
 
 def parse_args(argv=None):
@@ -80,7 +85,8 @@ def prepare_dataset(
     )
     class_to_id = {name: index for index, name in enumerate(class_names)}
     class_counts = Counter()
-    split_counts = Counter(assignments.values())
+    split_counts = Counter()
+    skipped_samples = []
 
     for split in ("train", "val", "test"):
         (output / "images" / split).mkdir(parents=True, exist_ok=False)
@@ -94,12 +100,24 @@ def prepare_dataset(
             # 空 txt 是 YOLO 标准的负样本表示：图片存在，但没有任何实例。
             lines, counts = [], Counter()
         else:
-            lines, counts = _convert_annotation(
-                annotation_path,
-                image_path,
-                class_to_id,
-            )
+            try:
+                lines, counts = _convert_annotation(
+                    annotation_path,
+                    image_path,
+                    class_to_id,
+                )
+            except InvalidPolygonError as exc:
+                # 整张图片不输出，避免只删掉坏轮廓后留下漏标的训练样本。
+                skipped_samples.append({
+                    "image": image_path.name,
+                    "annotation": annotation_path.name,
+                    "reason": str(exc),
+                })
+                del assignments[stem]
+                print(f"跳过样本 {image_path.name}: {exc}", file=sys.stderr)
+                continue
         class_counts.update(counts)
+        split_counts[split] += 1
         shutil.copy2(image_path, output / "images" / split / image_path.name)
         label_path = output / "labels" / split / f"{stem}.txt"
         label_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
@@ -117,12 +135,15 @@ def prepare_dataset(
     summary = {
         "source": str(source),
         "output": str(output),
-        "image_count": len(images),
+        "source_image_count": len(images),
+        "image_count": len(assignments),
         "split_counts": dict(split_counts),
         "class_counts": {
             name: class_counts.get(name, 0) for name in class_names
         },
         "unannotated_image_count": len(missing_annotations),
+        "skipped_image_count": len(skipped_samples),
+        "skipped_samples": skipped_samples,
     }
     _write_json(output / "classes.json", classes_payload)
     _write_json(output / "split_manifest.json", manifest)
@@ -210,7 +231,7 @@ def _convert_annotation(annotation_path, image_path, class_to_id):
             )
         points = shape.get("points")
         if not isinstance(points, list) or len(points) < 3:
-            raise ValueError(
+            raise InvalidPolygonError(
                 f"{annotation_path.name} shapes[{index}] 少于3个点"
             )
         coordinates = []

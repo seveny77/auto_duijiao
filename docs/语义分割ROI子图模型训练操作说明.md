@@ -190,8 +190,8 @@ E:\Users\Administrator\miniconda3\python.exe tools\train_segmentation.py `
 正式训练示例：
 
 ```powershell
-E:\Users\Administrator\miniconda3\python.exe tools\train_segmentation.py `
-  --data "F:\项目\自动对焦\code\yoloSegData\roi_v1\data.yaml" `
+ C:\Autofocus\runtime\venvs\autofocus\Scripts\python.exe tools\train_segmentation.py `
+  --data "C:\Seg\yoloSegDataMTF\roi_v2\data.yaml" `
   --base-model yolo11n-seg.pt `
   --epochs 100 `
   --imgsz 1024 `

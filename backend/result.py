@@ -18,6 +18,8 @@ class BestFrameReady:
     focus_ct_ms: dict = field(default_factory=dict)
     scan_end_position_um: float = 0.0
     return_target_um: float = 0.0
+    # 原图预定的绝对保存路径；事件先于落盘发布，写盘失败仍保留供结果图配对。
+    final_image_path: Optional[str] = None
 
 
 @dataclass
@@ -41,6 +43,8 @@ class SearchResult:
     # 它只用于评价和 GUI 图元，不允许绘制进 final_image 原图。
     evaluation_roi: Optional[EvaluationRoi] = None
     ct_ms: dict = field(default_factory=dict)
+    # 原图预定的绝对保存路径；不代表原图已成功写盘，未启用保存时为 None。
+    final_image_path: Optional[str] = None
 
 
 @dataclass
