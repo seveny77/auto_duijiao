@@ -116,6 +116,7 @@ class MainWindow(QMainWindow):
             path=self._config_path(),
             panel=self.param_panel,
             project_root=PROJECT_ROOT,
+            image_widget=self.image_widget,
         )
         self.config_service.load()
 
