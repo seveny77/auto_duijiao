@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """最终成像质检后台 Worker。"""
 
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import time
 
@@ -49,35 +50,26 @@ class InspectionWorker(QObject):
         self._circle_model_service = circle_model_service
         self._circle_detector = circle_detector
         self._rule_engine = rule_engine
+        # PyTorch CUDA 在 Windows 的 PyQt QThread 中可能卡在
+        # torch.cuda.synchronize。所有模型生命周期和推理固定交给同一个
+        # CPython threading.Thread；当前 QThread 只负责 Qt 排队与发信号。
+        self._python_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="inspection-gpu",
+        )
+        self._python_executor_shutdown = False
 
     @pyqtSlot(str, str, object)
     def load_model(self, model_path: str, circle_model_path: str, config):
         """在当前后台线程加载并预热分割模型和专用找圆模型。"""
 
         try:
-            self._segmentation_service.load(
+            metadata = self._run_on_python_thread(
+                self._load_models,
                 model_path,
-                imgsz=config.inference_imgsz,
-                confidence_floor=config.inference_confidence_floor,
-            )
-            self._circle_model_service.load(
                 circle_model_path,
-                confidence_floor=config.circle.confidence_floor,
+                config,
             )
-            metadata = {
-                "class_names": self._segmentation_service.class_names,
-                "load_ms": self._segmentation_service.load_ms,
-                "warmup_ms": self._segmentation_service.warmup_ms,
-                "inference_device": getattr(
-                    self._segmentation_service, "device", None
-                ),
-                "circle_model_path": self._circle_model_service.model_path,
-                "circle_load_ms": self._circle_model_service.load_ms,
-                "circle_warmup_ms": self._circle_model_service.warmup_ms,
-                "circle_inference_device": getattr(
-                    self._circle_model_service, "device", None
-                ),
-            }
             self.model_loaded.emit(
                 self._segmentation_service.model_path,
                 metadata,
@@ -85,11 +77,39 @@ class InspectionWorker(QObject):
         except Exception as error:
             self.model_load_failed.emit(_error_message(error))
 
+    def _load_models(self, model_path: str, circle_model_path: str, config):
+        """在专用 Python 线程中加载、预热并持有两个 CUDA 模型。"""
+
+        self._segmentation_service.load(
+            model_path,
+            imgsz=config.inference_imgsz,
+            confidence_floor=config.inference_confidence_floor,
+        )
+        self._circle_model_service.load(
+            circle_model_path,
+            confidence_floor=config.circle.confidence_floor,
+        )
+        return {
+            "class_names": self._segmentation_service.class_names,
+            "load_ms": self._segmentation_service.load_ms,
+            "warmup_ms": self._segmentation_service.warmup_ms,
+            "inference_device": getattr(
+                self._segmentation_service, "device", None
+            ),
+            "circle_model_path": self._circle_model_service.model_path,
+            "circle_load_ms": self._circle_model_service.load_ms,
+            "circle_warmup_ms": self._circle_model_service.warmup_ms,
+            "circle_inference_device": getattr(
+                self._circle_model_service, "device", None
+            ),
+        }
+
     @pyqtSlot(str, object, object, object)
     def inspect(self, task_id: str, image, config, original_image_path=None):
         """对整图找圆，逐 ROI 分割并输出多圆结果及旧 GUI 兼容结果。"""
 
-        image_result, compatibility_result = self._inspect_image(
+        image_result, compatibility_result = self._run_on_python_thread(
+            self._inspect_image,
             task_id,
             image,
             config,
@@ -118,7 +138,8 @@ class InspectionWorker(QObject):
         """重新找圆后按新 ROI 重跑分割，避免复用已经错位的局部结果。"""
 
         del source_result
-        image_result, compatibility_result = self._inspect_image(
+        image_result, compatibility_result = self._run_on_python_thread(
+            self._inspect_image,
             task_id,
             image,
             config,
@@ -300,10 +321,23 @@ class InspectionWorker(QObject):
         """在 Worker 线程中释放模型引用，然后通知上层退出线程。"""
 
         try:
-            self._segmentation_service.unload_for_shutdown()
-            self._circle_model_service.unload_for_shutdown()
+            if not self._python_executor_shutdown:
+                self._run_on_python_thread(self._unload_models)
         finally:
+            self._python_executor_shutdown = True
+            self._python_executor.shutdown(wait=True, cancel_futures=True)
             self.shutdown_complete.emit()
+
+    def _run_on_python_thread(self, operation, *args):
+        """串行执行 CUDA 操作，避免从 Windows PyQt QThread 直接调用。"""
+
+        if self._python_executor_shutdown:
+            raise RuntimeError("检测 GPU 执行线程已经关闭")
+        return self._python_executor.submit(operation, *args).result()
+
+    def _unload_models(self):
+        self._segmentation_service.unload_for_shutdown()
+        self._circle_model_service.unload_for_shutdown()
 
 
 def _elapsed_ms(start: float) -> float:

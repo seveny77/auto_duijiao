@@ -31,6 +31,9 @@ class FakeSegmentationService:
         self.fail_predict_calls = set()
         self.load_thread = None
         self.predict_thread = None
+        self.load_native_thread = None
+        self.predict_native_thread = None
+        self.unload_native_thread = None
         self.predict_calls = []
         self.predict_gate = None
         self.model_path = ""
@@ -40,6 +43,7 @@ class FakeSegmentationService:
 
     def load(self, path, **kwargs):
         self.load_thread = QThread.currentThread()
+        self.load_native_thread = threading.current_thread()
         if self.fail_load:
             raise RuntimeError("load failed")
         self.loaded = True
@@ -47,6 +51,7 @@ class FakeSegmentationService:
 
     def predict(self, image, **kwargs):
         self.predict_thread = QThread.currentThread()
+        self.predict_native_thread = threading.current_thread()
         self.predict_calls.append((image, kwargs))
         call_number = len(self.predict_calls)
         if self.predict_gate is not None:
@@ -64,6 +69,7 @@ class FakeSegmentationService:
         )]
 
     def unload_for_shutdown(self):
+        self.unload_native_thread = threading.current_thread()
         self.loaded = False
 
 
@@ -72,10 +78,12 @@ class FakeCircleDetector:
         self.calls = []
         self.detect_gate = None
         self.detect_thread = None
+        self.detect_native_thread = None
         self.return_value = None
 
     def detect(self, image, config):
         self.detect_thread = QThread.currentThread()
+        self.detect_native_thread = threading.current_thread()
         self.calls.append((image, config))
         if self.detect_gate is not None:
             self.detect_gate.wait(timeout=2.0)
@@ -169,6 +177,25 @@ class InspectionServiceTest(unittest.TestCase):
 
         self.assertTrue(self.service.is_model_loaded)
         self.assertIsNot(self.segmentation.load_thread, main_thread)
+
+    def test_model_load_and_predict_share_dedicated_python_thread(self):
+        self._load_model()
+        completed = []
+        self.service.inspection_finished.connect(
+            lambda task_id, result: completed.append((task_id, result))
+        )
+
+        self.service.submit_image(
+            np.zeros((20, 30, 3), dtype=np.uint8),
+            self.config,
+        )
+        self.assertTrue(self._wait_until(lambda: len(completed) == 1))
+
+        gpu_thread = self.segmentation.load_native_thread
+        self.assertIsNotNone(gpu_thread)
+        self.assertTrue(gpu_thread.name.startswith("inspection-gpu"))
+        self.assertIs(self.segmentation.predict_native_thread, gpu_thread)
+        self.assertIs(self.circle.detect_native_thread, gpu_thread)
 
     def test_model_load_failure_returns_to_not_loaded_and_can_retry(self):
         failures = []
