@@ -29,9 +29,15 @@ conda run -n autofocus python -m pip install -r deploy\requirements-runtime.txt
 conda run -n autofocus python -m pip install -r deploy\requirements-torch-cu128.txt
 ```
 
-部署环境固定为 Python 3.12。已有 Python 3.13 环境会自动回退为 CPU 推理，
-避免 PyTorch CUDA 在 Qt 工作线程中造成进程级崩溃。重建 3.12 环境后默认
-恢复 Ultralytics 的 CUDA 自动选择。也可在完成独立诊断后临时显式指定设备：
+部署环境固定为 Python 3.13。找圆模型和分割模型统一在专用 CPython 线程中
+加载和推理，避免从 Windows Qt 原生工作线程直接调用 CUDA。未指定设备时由
+Ultralytics 自动选择；生产启动入口显式使用首张 CUDA 设备：
+
+```powershell
+deploy\start_gui_py313.cmd
+```
+
+也可以在独立诊断时显式指定设备：
 
 ```powershell
 $env:AUTOFOCUS_YOLO_DEVICE = "0"    # 首张 CUDA 设备
@@ -40,10 +46,10 @@ $env:AUTOFOCUS_YOLO_DEVICE = "cpu"  # 强制 CPU
 
 Ultralytics 联网统计由应用在模型导入时关闭；工控机推理不依赖外网。
 
-## 从现有 Python 3.13 迁移到 3.12 CUDA
+## Python 3.12 CUDA 回退环境
 
-退出自动对焦 GUI，在项目根目录执行以下命令。两个模型参数必须填写工控机
-上的实际绝对路径：
+需要对比运行时，可退出自动对焦 GUI，在项目根目录创建并验证独立的 Python
+3.12 环境。两个模型参数必须填写工控机上的实际绝对路径：
 
 ```powershell
 powershell -ExecutionPolicy Bypass `

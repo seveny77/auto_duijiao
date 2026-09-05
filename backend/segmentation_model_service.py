@@ -89,7 +89,7 @@ class SegmentationModelService:
         device = resolve_yolo_device()
         if device == "cpu":
             logger.warning(
-                "当前 Windows Python 版本使用 CPU 执行分割推理；"
+                "分割推理已显式配置为 CPU；"
                 "设置 AUTOFOCUS_YOLO_DEVICE=0 可显式启用首张 CUDA 设备"
             )
 

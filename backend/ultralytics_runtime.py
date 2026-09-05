@@ -2,7 +2,6 @@
 """Ultralytics 在 Windows 工控机上的运行时兼容设置。"""
 
 import os
-import sys
 import logging
 from typing import Optional
 
@@ -34,17 +33,14 @@ def load_yolo_class():
 def resolve_yolo_device() -> Optional[str]:
     """返回显式设备；None 让 Ultralytics 使用正常的自动选择逻辑。
 
-    PyTorch 2.7.1 CUDA 在 Windows CPython 3.13 的 Qt 原生工作线程中可能
-    直接触发 ``_PyThreadState_Attach`` 致命错误，Python 无法捕获它。
-    现有 3.13 部署默认使用 CPU 保证进程存活；Python 3.12 部署继续使用
-    Ultralytics 的自动设备选择。环境变量可显式覆盖为 ``cpu``、``0`` 等。
+    检测服务已将 CUDA 模型生命周期和推理移到专用 CPython 线程，避免
+    Windows Qt 原生工作线程中的线程状态问题，因此 Python 3.13 也可使用
+    Ultralytics 的正常 CUDA 自动选择。环境变量仍可覆盖为 ``cpu``、``0`` 等。
     """
 
     configured = os.environ.get(DEVICE_ENVIRONMENT_VARIABLE)
     if configured is not None and configured.strip():
         return configured.strip()
-    if os.name == "nt" and sys.version_info[:2] >= (3, 13):
-        return "cpu"
     return None
 
 

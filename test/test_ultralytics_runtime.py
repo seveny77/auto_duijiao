@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Windows Ultralytics 设备回退和联网统计关闭测试。"""
+"""Ultralytics 设备选择和联网统计关闭测试。"""
 
 import os
 import sys
@@ -31,28 +31,16 @@ class ReadOnlySettings(FakeSettings):
 
 
 class UltralyticsRuntimeTest(unittest.TestCase):
-    def test_windows_python_313_defaults_to_cpu(self):
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch("backend.ultralytics_runtime.os.name", "nt"),
-            patch("backend.ultralytics_runtime.sys.version_info", (3, 13, 11)),
-        ):
-            self.assertEqual(resolve_yolo_device(), "cpu")
-
-    def test_python_312_uses_normal_automatic_device_selection(self):
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch("backend.ultralytics_runtime.os.name", "nt"),
-            patch("backend.ultralytics_runtime.sys.version_info", (3, 12, 10)),
-        ):
+    def test_unconfigured_runtime_uses_normal_automatic_device_selection(self):
+        with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(resolve_yolo_device())
             self.assertEqual(device_predict_kwargs(None), {})
 
-    def test_environment_setting_overrides_compatibility_fallback(self):
-        with (
-            patch.dict(os.environ, {DEVICE_ENVIRONMENT_VARIABLE: " 0 "}, clear=True),
-            patch("backend.ultralytics_runtime.os.name", "nt"),
-            patch("backend.ultralytics_runtime.sys.version_info", (3, 13, 11)),
+    def test_environment_setting_selects_explicit_device(self):
+        with patch.dict(
+            os.environ,
+            {DEVICE_ENVIRONMENT_VARIABLE: " 0 "},
+            clear=True,
         ):
             self.assertEqual(resolve_yolo_device(), "0")
             self.assertEqual(device_predict_kwargs("0"), {"device": "0"})
