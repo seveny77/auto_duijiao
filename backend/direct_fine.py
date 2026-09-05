@@ -625,3 +625,384 @@ class SoftwareBestFrameCollector:
         with self._lock:
             self._triggered += 1
             self._last_trigger_ts = time.monotonic()
+
+
+@dataclass(frozen=True)
+class ContinuousBestFrameResult:
+    """连续自由运行采集结束后的最佳帧与运行统计。"""
+
+    received_count: int
+    enqueued_count: int
+    processed_count: int
+    dropped_count: int
+    queue_peak: int
+    best_index: int
+    best_score: float
+    best_image: object
+    evaluation_roi_local: LocalRoi
+    configured_fps: float
+    resulting_fps: Optional[float]
+    completed: bool
+    timings_ms: Dict[str, float] = field(default_factory=dict)
+
+
+class ContinuousBestFrameCollector:
+    """连续采集时异步评价清晰度，仅保留一张最佳图。
+
+    相机 SDK 回调线程只做一次非阻塞入队，绝不在回调中执行 OpenCV
+    清晰度计算、GUI 刷新或文件保存。后台线程负责评价图像；只有出现新的
+    最佳帧时，才通过 ``preview_callback`` 通知外部更新预览。
+
+    本类不依赖运动轴。后续 Pipeline 会在轴开始单程扫描前调用
+    :meth:`start`，扫描结束后调用 :meth:`stop_and_drain`。
+    """
+
+    def __init__(
+        self,
+        camera,
+        evaluator,
+        evaluation_roi: Optional[LocalRoi] = None,
+        *,
+        target_fps: float,
+        max_queue: int = 4,
+        first_frame_timeout_s: float = 1.0,
+        drain_timeout_s: float = 5.0,
+        cancel_event=None,
+        preview_callback=None,
+    ):
+        requested_fps = float(target_fps)
+        if requested_fps <= 0:
+            raise ValueError("连续采集目标帧率必须大于0")
+        if max_queue <= 0:
+            raise ValueError("连续采集评价队列容量必须大于0")
+        if first_frame_timeout_s <= 0:
+            raise ValueError("连续采集首帧超时必须大于0")
+        if drain_timeout_s <= 0:
+            raise ValueError("连续采集排空超时必须大于0")
+
+        self._cam = camera
+        self._evaluator = evaluator
+        self._evaluation_roi = evaluation_roi
+        self._target_fps = requested_fps
+        self._queue = queue.Queue(maxsize=int(max_queue))
+        self._first_frame_timeout_s = float(first_frame_timeout_s)
+        self._drain_timeout_s = float(drain_timeout_s)
+        self._cancel = cancel_event
+        self._preview_callback = preview_callback
+
+        self._stop = threading.Event()
+        self._first_frame_event = threading.Event()
+        self._completed = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+        self._accepting_frames = False
+
+        self._received = 0
+        self._enqueued = 0
+        self._processed = 0
+        self._dropped = 0
+        self._queue_peak = 0
+        self._best_index = -1
+        self._best_score = float("-inf")
+        self._best_image = None
+        self._resolved_roi: Optional[LocalRoi] = None
+        self._configured_fps = requested_fps
+        self._resulting_fps: Optional[float] = None
+        self._error: Optional[str] = None
+        self._start_ts = 0.0
+        self._first_frame_ts = 0.0
+        self._last_processed_ts = 0.0
+        self._score_ms = 0.0
+
+    @property
+    def error(self) -> Optional[str]:
+        with self._lock:
+            return self._error
+
+    def stats(self) -> dict:
+        """返回无需等待任务结束的轻量运行统计。"""
+
+        with self._lock:
+            return {
+                "received": self._received,
+                "enqueued": self._enqueued,
+                "processed": self._processed,
+                "dropped": self._dropped,
+                "queue_peak": self._queue_peak,
+                "configured_fps": self._configured_fps,
+                "resulting_fps": self._resulting_fps,
+            }
+
+    def start(self) -> None:
+        """切换自由运行，启动后台评价线程和相机连续取流。"""
+
+        if self._thread is not None:
+            raise RuntimeError("连续采集器已经启动")
+
+        self._start_ts = time.perf_counter()
+
+        # 连续采集必须显式关闭硬件/软件触发。帧率节点在不同相机上
+        # 可能依赖 TriggerMode=OFF，因此顺序固定为先自由运行、后设帧率。
+        self._cam.set_trigger_mode("off")
+        frame_rate_info = self._cam.set_continuous_frame_rate(
+            self._target_fps
+        )
+        self._configured_fps = float(
+            getattr(frame_rate_info, "configured_fps", self._target_fps)
+        )
+        resulting_fps = getattr(frame_rate_info, "resulting_fps", None)
+        self._resulting_fps = (
+            float(resulting_fps)
+            if resulting_fps is not None
+            else None
+        )
+
+        self._cam.register_frame_callback(self._on_frame)
+        self._accepting_frames = True
+        self._thread = threading.Thread(
+            target=self._worker,
+            name="continuous-best-frame",
+            daemon=True,
+        )
+        self._thread.start()
+        try:
+            self._cam.start_grabbing()
+        except Exception:
+            self._accepting_frames = False
+            self._stop.set()
+            self._thread.join(timeout=2.0)
+            self._thread = None
+            raise
+
+    def wait_for_first_frame(self, timeout: Optional[float] = None) -> bool:
+        """等待首帧；默认使用构造时配置的首帧超时。"""
+
+        wait_timeout = (
+            self._first_frame_timeout_s
+            if timeout is None
+            else float(timeout)
+        )
+        if wait_timeout <= 0:
+            raise ValueError("首帧等待时间必须大于0")
+        if not self._first_frame_event.wait(wait_timeout):
+            return False
+        return self.error is None
+
+    def stop_and_drain(self, timeout: Optional[float] = None) -> bool:
+        """停止连续取流，并等待已入队帧全部完成评价。"""
+
+        drain_timeout = (
+            self._drain_timeout_s if timeout is None else float(timeout)
+        )
+        if drain_timeout <= 0:
+            raise ValueError("连续采集排空超时必须大于0")
+
+        self._accepting_frames = False
+        self._stop.set()
+        try:
+            self._cam.stop_grabbing()
+        except Exception as error:
+            logger.warning("连续采集停止取流失败: %s", error)
+
+        thread = self._thread
+        if thread is None:
+            return True
+        if thread is threading.current_thread():
+            raise RuntimeError("连续采集器不能在评价线程内等待自身退出")
+        thread.join(timeout=drain_timeout)
+        if thread.is_alive():
+            with self._lock:
+                if self._error is None:
+                    self._error = (
+                        "连续采集排空超时: "
+                        f"{drain_timeout:g}s 内未完成队列处理"
+                    )
+            return False
+
+        self._thread = None
+        self._completed.set()
+        return self.error is None
+
+    def result(self) -> ContinuousBestFrameResult:
+        """取得当前已处理完成的最佳帧结果快照。"""
+
+        with self._lock:
+            if self._error is not None:
+                raise RuntimeError(self._error)
+            if self._dropped:
+                raise RuntimeError(
+                    f"连续采集评价队列已满，已拒绝{self._dropped}帧"
+                )
+            if self._best_index < 0 or self._best_image is None:
+                raise RuntimeError("连续采集没有产生最佳图像")
+
+            height, width = self._best_image.shape[:2]
+            roi = self._resolved_roi or (0, 0, int(width), int(height))
+            first_wait_ms = 0.0
+            processing_elapsed_ms = 0.0
+            capture_elapsed_ms = 0.0
+            if self._first_frame_ts and self._start_ts:
+                first_wait_ms = (
+                    self._first_frame_ts - self._start_ts
+                ) * 1000
+            if self._last_processed_ts and self._first_frame_ts:
+                processing_elapsed_ms = (
+                    self._last_processed_ts - self._first_frame_ts
+                ) * 1000
+            if self._last_processed_ts and self._start_ts:
+                capture_elapsed_ms = (
+                    self._last_processed_ts - self._start_ts
+                ) * 1000
+
+            return ContinuousBestFrameResult(
+                received_count=self._received,
+                enqueued_count=self._enqueued,
+                processed_count=self._processed,
+                dropped_count=self._dropped,
+                queue_peak=self._queue_peak,
+                best_index=self._best_index,
+                best_score=self._best_score,
+                best_image=self._best_image,
+                evaluation_roi_local=roi,
+                configured_fps=self._configured_fps,
+                resulting_fps=self._resulting_fps,
+                completed=self._completed.is_set(),
+                timings_ms={
+                    "first_frame_wait_ms": first_wait_ms,
+                    "score_total_ms": self._score_ms,
+                    "score_avg_ms": (
+                        self._score_ms / self._processed
+                        if self._processed else 0.0
+                    ),
+                    "frame_processing_elapsed_ms": processing_elapsed_ms,
+                    "capture_and_processing_elapsed_ms": capture_elapsed_ms,
+                },
+            )
+
+    def _on_frame(self, image) -> None:
+        """相机 SDK 回调：仅登记、入队和记录队列水位。"""
+
+        if not self._accepting_frames or self._stop.is_set():
+            return
+
+        now = time.perf_counter()
+        with self._lock:
+            sequence = self._received
+            self._received += 1
+            if self._first_frame_ts == 0.0:
+                self._first_frame_ts = now
+                self._first_frame_event.set()
+
+        try:
+            self._queue.put_nowait((image, sequence))
+        except queue.Full:
+            # 不静默丢帧。不能从 SDK 回调里直接 stop_grabbing，避免在
+            # SDK 的回调重入路径中调用停流；后续 Pipeline 会看到 error
+            # 并终止本轮扫描，然后由 stop_and_drain 安全停流。
+            with self._lock:
+                self._dropped += 1
+                if self._error is None:
+                    self._error = (
+                        "连续采集评价队列已满，处理速度低于相机采集速度"
+                    )
+            self._accepting_frames = False
+            self._stop.set()
+            return
+
+        with self._lock:
+            self._enqueued += 1
+            self._queue_peak = max(
+                self._queue_peak,
+                self._queue.qsize(),
+            )
+
+    def _worker(self) -> None:
+        try:
+            while not self._stop.is_set() or not self._queue.empty():
+                if self._cancel is not None and self._cancel.is_set():
+                    with self._lock:
+                        if self._error is None:
+                            self._error = "用户取消连续采集"
+                    self._accepting_frames = False
+                    self._stop.set()
+                    break
+
+                try:
+                    image, sequence = self._queue.get(timeout=0.02)
+                except queue.Empty:
+                    if (
+                        not self._first_frame_event.is_set()
+                        and self._start_ts > 0
+                        and time.perf_counter() - self._start_ts
+                        > self._first_frame_timeout_s
+                    ):
+                        with self._lock:
+                            if self._error is None:
+                                self._error = (
+                                    "连续采集启动后在 "
+                                    f"{self._first_frame_timeout_s:g}s 内没有收到图像"
+                                )
+                        self._accepting_frames = False
+                        self._stop.set()
+                    continue
+
+                try:
+                    self._process_frame(image, sequence)
+                except Exception as error:
+                    with self._lock:
+                        self._error = (
+                            f"连续采集第{sequence}帧处理失败: {error}"
+                        )
+                    self._accepting_frames = False
+                    self._stop.set()
+                finally:
+                    self._queue.task_done()
+        finally:
+            # 正常结束时，取流由 stop_and_drain 的调用线程停止。这里不直接
+            # 调 SDK，避免和主流程的运动结束/相机清理发生并发竞争。
+            pass
+
+    def _process_frame(self, image, sequence: int) -> None:
+        if self._resolved_roi is None:
+            self._resolved_roi = self._normalize_roi(image)
+
+        score_t0 = time.perf_counter()
+        score = float(
+            self._evaluator.evaluate_image(image, self._resolved_roi)
+        )
+        score_ms = (time.perf_counter() - score_t0) * 1000
+
+        preview_image = None
+        with self._lock:
+            self._score_ms += score_ms
+            if score > self._best_score:
+                self._best_score = score
+                self._best_index = sequence
+                self._best_image = (
+                    image.copy() if hasattr(image, "copy") else image
+                )
+                preview_image = self._best_image
+            self._processed += 1
+            self._last_processed_ts = time.perf_counter()
+
+        # 只为新的最佳帧刷新 GUI；调用发生在后台评价线程，不是 SDK 回调。
+        if preview_image is not None and self._preview_callback is not None:
+            self._preview_callback(preview_image, sequence, score)
+
+    def _normalize_roi(self, image) -> LocalRoi:
+        height, width = image.shape[:2]
+        if self._evaluation_roi is None:
+            return 0, 0, int(width), int(height)
+        values = tuple(int(value) for value in self._evaluation_roi)
+        if len(values) != 4:
+            raise ValueError("清晰度 ROI 必须是 (x, y, width, height)")
+        x, y, roi_width, roi_height = values
+        if (
+            x < 0 or y < 0 or roi_width <= 0 or roi_height <= 0
+            or x + roi_width > width
+            or y + roi_height > height
+        ):
+            raise ValueError(
+                f"清晰度 ROI 越界: {values}, 图像={width}x{height}"
+            )
+        return values

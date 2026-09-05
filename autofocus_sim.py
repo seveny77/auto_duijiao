@@ -245,6 +245,12 @@ class SimCamera:
     def set_trigger_mode(self, mode="off"):
         self._trigger_mode = mode
 
+    def set_continuous_frame_rate(self, fps):
+        """兼容真实相机的连续帧率接口；仿真出帧节奏保持原设置。"""
+
+        if float(fps) <= 0:
+            raise ValueError("仿真连续采集帧率必须大于0")
+
     def capture_frame(self, timeout_ms=1000):
         """返回一张占位图，供AI策略离线验证接口。"""
 

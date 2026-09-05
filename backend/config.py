@@ -76,10 +76,15 @@ class FocusConfig:
     flyscan_timeout: float = 600.0
     frame_wait_timeout: float = 60.0
     final_frame_timeout: float = 3.0
-    # 新版连续精扫使用软件触发；0 表示处理完上一帧后立即触发下一帧。
+    # 旧版连续精扫的软件触发参数暂保留，方便必要时回退旧实现。
     soft_trigger_interval_s: float = 0.0
     soft_trigger_frame_timeout_s: float = 1.0
     soft_trigger_queue_size: int = 2
+    # 新版连续精扫：相机自由运行，回调采集与清晰度评价并行。
+    continuous_capture_fps: float = 20.0
+    continuous_capture_queue_size: int = 4
+    continuous_first_frame_timeout_s: float = 1.0
+    continuous_drain_timeout_s: float = 5.0
     continuous_scan_velocity_um_s: float = 50.0
     yes: bool = False
 

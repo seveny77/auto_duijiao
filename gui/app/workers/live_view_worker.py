@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 class LiveViewWorker(QObject):
     frame = pyqtSignal(object)
+    # 相机回调实际到达应用的滚动平均帧率，不是 GUI 绘制帧率。
+    fps = pyqtSignal(float)
     state = pyqtSignal(str)
     error = pyqtSignal(str)
     settled = pyqtSignal() #退出阻断信号
@@ -26,6 +28,8 @@ class LiveViewWorker(QObject):
         self._cam_params = camera_params or {}  # 相机参数（曝光/增益/Binning）
         # CameraService的常驻相机句柄；None时预览自开自关。
         self._camera = camera
+        self._fps_window_started_at = 0.0
+        self._fps_window_count = 0
 
     def start(self):
         """运行实时预览任务。
@@ -106,7 +110,7 @@ class LiveViewWorker(QObject):
                 )
                 break
 
-            self.frame.emit(image)
+            self._publish_frame(image)
 
             idx += 1
             time.sleep(0.05)
@@ -245,6 +249,20 @@ class LiveViewWorker(QObject):
                     logger.exception("实时预览结束停止取流失败")
 
     def _on_camera_frame(self, img):
-        """SDK 回调线程里执行：只发信号，绝不碰界面。"""
+        """SDK 回调线程里执行：只计数和发信号，绝不碰界面。"""
         if not self._stop.is_set():
-            self.frame.emit(img)
+            self._publish_frame(img)
+
+    def _publish_frame(self, image) -> None:
+        """转发一帧，并每约 0.5 秒发布一次实际接收帧率。"""
+
+        now = time.monotonic()
+        if self._fps_window_started_at <= 0.0:
+            self._fps_window_started_at = now
+        self._fps_window_count += 1
+        elapsed = now - self._fps_window_started_at
+        if elapsed >= 0.5:
+            self.fps.emit(self._fps_window_count / elapsed)
+            self._fps_window_started_at = now
+            self._fps_window_count = 0
+        self.frame.emit(image)

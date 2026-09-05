@@ -91,6 +91,10 @@ class LiveViewService(QObject):
             self._on_frame,
             Qt.QueuedConnection,
         )
+        worker.fps.connect(
+            self._on_fps,
+            Qt.QueuedConnection,
+        )
         worker.state.connect(
             self._on_state,
             Qt.QueuedConnection,
@@ -117,6 +121,7 @@ class LiveViewService(QObject):
         self._stop_event = stop_event
         self._active = True
         self._last_frame_ts = 0.0
+        self._image_widget.set_live_fps(None)
 
         self._live_btn.setEnabled(True)
         self._live_btn.setText("停止实时预览")
@@ -184,6 +189,13 @@ class LiveViewService(QObject):
         self._last_frame_ts = now
         self._image_widget.show_frame(image)
 
+    def _on_fps(self, fps: float):
+        """在 GUI 主线程显示相机回调实际到达的滚动平均帧率。"""
+
+        if self.sender() is not self._worker or not self._active:
+            return
+        self._image_widget.set_live_fps(fps)
+
     def _on_state(self, state: str):
         """在 GUI 主线程中处理 Worker 状态。"""
 
@@ -204,6 +216,7 @@ class LiveViewService(QObject):
 
         elif state == "stopped":
             self._active = False
+            self._image_widget.set_live_fps(None)
             self._show_stopped_state()
 
             logger.info("实时预览已停止")
@@ -240,6 +253,7 @@ class LiveViewService(QObject):
         self._thread = None
         self._stop_event = None
         self._active = False
+        self._image_widget.set_live_fps(None)
 
         self._show_stopped_state()
         self.settled.emit()

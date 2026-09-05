@@ -124,10 +124,10 @@ class ConfigService:
             "continuous_velocity_um_s": (
                 self._panel.continuous_velocity_spin.value()
             ),
-            "soft_trigger_interval_ms": (
+            "continuous_capture_fps": (
                 self._panel.soft_trigger_interval_spin.value()
             ),
-            "soft_trigger_timeout_s": (
+            "continuous_first_frame_timeout_s": (
                 self._panel.soft_trigger_timeout_spin.value()
             ),
             "coarse_step_um": self._panel.coarse_step_spin.value(),
@@ -227,10 +227,10 @@ class ConfigService:
         cfg.continuous_scan_velocity_um_s = (
             self._panel.continuous_velocity_spin.value()
         )
-        cfg.soft_trigger_interval_s = (
-            self._panel.soft_trigger_interval_spin.value() / 1000.0
+        cfg.continuous_capture_fps = (
+            self._panel.soft_trigger_interval_spin.value()
         )
-        cfg.soft_trigger_frame_timeout_s = (
+        cfg.continuous_first_frame_timeout_s = (
             self._panel.soft_trigger_timeout_spin.value()
         )
         cfg.search_start_um = (
@@ -346,10 +346,10 @@ class ConfigService:
             cfg.get("continuous_velocity_um_s", 50.0)
         )
         self._panel.soft_trigger_interval_spin.setValue(
-            cfg.get("soft_trigger_interval_ms", 0.0)
+            cfg.get("continuous_capture_fps", 20.0)
         )
         self._panel.soft_trigger_timeout_spin.setValue(
-            cfg.get("soft_trigger_timeout_s", 1.0)
+            cfg.get("continuous_first_frame_timeout_s", 1.0)
         )
         self._panel.coarse_step_spin.setValue(
             cfg.get("coarse_step_um", 100)

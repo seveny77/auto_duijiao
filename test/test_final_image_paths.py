@@ -74,7 +74,7 @@ class ContinuousFinalImagePathTests(unittest.TestCase):
             best_frame_ready_callback=self.events.append,
         )
         collector_patch = patch.object(
-            pipeline, "SoftwareBestFrameCollector", return_value=self.collector
+            pipeline, "ContinuousBestFrameCollector", return_value=self.collector
         )
         collector_patch.start()
         self.addCleanup(collector_patch.stop)

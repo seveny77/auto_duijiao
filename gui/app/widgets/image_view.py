@@ -5,12 +5,13 @@ import math
 
 import cv2
 from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QCursor, QImage, QPen, QPixmap
+from PyQt5.QtGui import QColor, QCursor, QFont, QImage, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QGraphicsItem,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
     QGraphicsScene,
+    QGraphicsSimpleTextItem,
     QGraphicsView,
     QGroupBox,
     QHBoxLayout,
@@ -356,6 +357,16 @@ class ImageWidget(QGroupBox):
         self._scene = QGraphicsScene(self)
         self.pixel_item = QGraphicsPixmapItem()
         self._scene.addItem(self.pixel_item)
+        self._fps_item = QGraphicsSimpleTextItem()
+        self._fps_item.setBrush(QColor(70, 255, 130))
+        self._fps_item.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        self._fps_item.setFlag(
+            QGraphicsItem.ItemIgnoresTransformations,
+            True,
+        )
+        self._fps_item.setZValue(50)
+        self._fps_item.setVisible(False)
+        self._scene.addItem(self._fps_item)
 
         self._roi = None
         self._frame_width = 0
@@ -462,6 +473,16 @@ class ImageWidget(QGroupBox):
         )
         if should_reset:
             self._view.reset_zoom()
+
+    def set_live_fps(self, fps) -> None:
+        """显示或隐藏实时预览的相机回调接收帧率。"""
+
+        if fps is None:
+            self._fps_item.setVisible(False)
+            return
+        self._fps_item.setText(f"接收 FPS: {float(fps):.1f}")
+        self._fps_item.setPos(12.0, 12.0)
+        self._fps_item.setVisible(True)
 
     def _on_roi_item_changed(self, roi) -> None:
         if self._frame_width <= 0 or self._frame_height <= 0:

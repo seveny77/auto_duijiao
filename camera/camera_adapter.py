@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import sys
 import time
@@ -6,6 +7,7 @@ import threading
 import queue
 import numpy as np
 import cv2
+from dataclasses import dataclass
 from ctypes import *
 
 # 优先加载 MVS 运行时 DLL，避免加载到其他旧版 MvCameraControl.dll（如 LBAS 运行时）
@@ -28,6 +30,22 @@ from camera.frame_converter import _frame_to_numpy
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ContinuousFrameRateInfo:
+    """连续采集帧率节点的当前可用信息。
+
+    ``configured_fps`` 是写入 ``AcquisitionFrameRate`` 后读回的配置值；
+    ``resulting_fps`` 是相机在当前曝光、带宽和 ROI 条件下实际可能达到的
+    帧率。后者不是所有相机都提供，因此允许为 ``None``。
+    """
+
+    minimum_fps: float
+    maximum_fps: float
+    increment_fps: float
+    configured_fps: float
+    resulting_fps: float | None = None
 
 
 # 相机 SDK 属于整个 Python 进程，而不是某一个 HikCamera 对象。
@@ -393,6 +411,170 @@ class HikCamera:
             gain_db,
         )
         return True
+
+    def _read_float_node(self, node_name: str) -> MVCC_FLOATVALUE:
+        """读取一个浮点 GenICam 节点，失败时给出带节点名的错误。"""
+
+        cam = self._cam
+
+        if cam is None:
+            raise RuntimeError(
+                f"相机未打开，无法读取浮点节点 {node_name}"
+            )
+
+        value = MVCC_FLOATVALUE()
+        ret = cam.MV_CC_GetFloatValue(node_name, value)
+
+        if ret != 0:
+            raise RuntimeError(
+                f"读取相机浮点节点失败: "
+                f"node={node_name}, error=0x{ret:X}"
+            )
+
+        return value
+
+    def get_continuous_frame_rate_info(self) -> ContinuousFrameRateInfo:
+        """读取相机连续采集帧率的范围、配置值和实际帧率。
+
+        该方法只读取节点，可在取流前后用于诊断。连续采集实际使用时，
+        调用方仍需把触发模式设为 ``off``；本方法不会擅自改变相机触发模式。
+        """
+
+        configured = self._read_float_node("AcquisitionFrameRate")
+
+        # ResultingFrameRate 是可选诊断节点。某些 USB 相机或旧版固件没有
+        # 该节点，不能因为少了诊断信息而阻止后续连续采集。
+        resulting_fps = None
+        try:
+            resulting = self._read_float_node("ResultingFrameRate")
+            resulting_fps = float(resulting.fCurValue)
+        except RuntimeError as exc:
+            logger.debug("相机未提供 ResultingFrameRate: %s", exc)
+
+        return ContinuousFrameRateInfo(
+            minimum_fps=float(configured.fMin),
+            maximum_fps=float(configured.fMax),
+            increment_fps=float(configured.fInc),
+            configured_fps=float(configured.fCurValue),
+            resulting_fps=resulting_fps,
+        )
+
+    def get_continuous_frame_rate(self) -> float:
+        """读取当前配置的连续采集目标帧率，单位 fps。"""
+
+        return self.get_continuous_frame_rate_info().configured_fps
+
+    def _enable_continuous_frame_rate_control(self) -> None:
+        """启用 AcquisitionFrameRate 节点，并读回确认状态。"""
+
+        cam = self._cam
+
+        if cam is None:
+            raise RuntimeError(
+                "相机未打开，无法启用连续采集帧率控制"
+            )
+
+        ret = cam.MV_CC_SetBoolValue(
+            "AcquisitionFrameRateEnable",
+            True,
+        )
+
+        if ret != 0:
+            raise RuntimeError(
+                "启用连续采集帧率控制失败: "
+                f"error=0x{ret:X}"
+            )
+
+        enabled = c_bool()
+        read_ret = cam.MV_CC_GetBoolValue(
+            "AcquisitionFrameRateEnable",
+            enabled,
+        )
+
+        if read_ret != 0:
+            raise RuntimeError(
+                "连续采集帧率开关读回失败: "
+                f"error=0x{read_ret:X}"
+            )
+
+        if not bool(enabled.value):
+            raise RuntimeError("连续采集帧率控制未实际启用")
+
+    def set_continuous_frame_rate(
+            self,
+            target_fps: float,
+    ) -> ContinuousFrameRateInfo:
+        """设置连续采集目标帧率并读回校验。
+
+        必须在停止取流后调用。这里仅控制相机的帧率节点，不切换
+        TriggerMode；后续连续采集流程会显式设置 ``TriggerMode=off``。
+        """
+
+        if self._cam is None:
+            raise RuntimeError(
+                "相机未打开，无法设置连续采集帧率"
+            )
+
+        if self._is_grabbing:
+            raise RuntimeError(
+                "相机正在取流，必须先停止取流才能修改连续采集帧率"
+            )
+
+        requested_fps = float(target_fps)
+
+        if not math.isfinite(requested_fps) or requested_fps <= 0:
+            raise ValueError(
+                f"连续采集帧率必须是大于 0 的有限数值: {target_fps!r}"
+            )
+
+        supported = self.get_continuous_frame_rate_info()
+        minimum_fps = supported.minimum_fps
+        maximum_fps = supported.maximum_fps
+
+        if requested_fps < minimum_fps or requested_fps > maximum_fps:
+            raise ValueError(
+                "连续采集帧率超出相机支持范围: "
+                f"请求={requested_fps:g}fps, "
+                f"范围=[{minimum_fps:g}, {maximum_fps:g}]fps"
+            )
+
+        self._enable_continuous_frame_rate_control()
+
+        ret = self._cam.MV_CC_SetFloatValue(
+            "AcquisitionFrameRate",
+            requested_fps,
+        )
+
+        if ret != 0:
+            raise RuntimeError(
+                "设置连续采集帧率失败: "
+                f"value={requested_fps:g}fps, error=0x{ret:X}"
+            )
+
+        actual = self.get_continuous_frame_rate_info()
+        # 相机可能按其节点步进做量化；半个步进以内即表示读回正确。
+        tolerance = max(actual.increment_fps / 2.0, 0.001)
+
+        if abs(actual.configured_fps - requested_fps) > tolerance:
+            raise RuntimeError(
+                "连续采集帧率实际值不一致: "
+                f"请求={requested_fps:g}fps, "
+                f"实际={actual.configured_fps:g}fps, "
+                f"允许误差={tolerance:g}fps"
+            )
+
+        logger.info(
+            "continuous acquisition frame rate: "
+            "request=%gfps, configured=%gfps, resulting=%s",
+            requested_fps,
+            actual.configured_fps,
+            (
+                f"{actual.resulting_fps:g}fps"
+                if actual.resulting_fps is not None
+                else "unavailable"
+            ),
+        )
+        return actual
 
     def get_sensor_size(self) -> tuple[int, int]:
         """读取相机当前采样条件下允许的最大宽高。"""

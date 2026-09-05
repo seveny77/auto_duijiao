@@ -32,7 +32,7 @@ from backend.collector import (
 )
 from backend.config import FocusConfig
 from backend.detection import detect_roi
-from backend.direct_fine import SoftwareBestFrameCollector
+from backend.direct_fine import ContinuousBestFrameCollector
 from backend.result import (
     BestFrameReady,
     CalibrateResult,
@@ -321,7 +321,7 @@ def run_phase(
         raise
 
 def _run_continuous_search(cfg) -> SearchResult:
-    """执行新版单次连续精扫：软件触发采图并返回最佳帧。"""
+    """执行单次连续精扫：连续取流与清晰度评价并行，返回最佳帧。"""
 
     cancel = cfg.cancel_event
     search_start = int(cfg.search_start_um)
@@ -351,7 +351,7 @@ def _run_continuous_search(cfg) -> SearchResult:
             )
 
             motion = FakeMotionBackend(search_start, search_end)
-            # 仿真用有限帧数结束采集；真实流程由运动结束决定。
+            # 仿真相机由扫描结束时停止；真实流程同样由运动结束决定。
             sim_count = 32
             sim_step = max(1, int(cfg.search_span_um) // sim_count)
             sim_peak = search_start + int(cfg.search_span_um * 0.55)
@@ -364,7 +364,6 @@ def _run_continuous_search(cfg) -> SearchResult:
                     sim_peak,
                 )
             )
-            frame_limit = sim_count
         else:
             motion = cfg.motion_backend
             if motion is None or not motion.is_connected():
@@ -393,10 +392,9 @@ def _run_continuous_search(cfg) -> SearchResult:
 
             cam.set_exposure(cfg.exposure_us)
             cam.set_gain(cfg.gain_db)
-            frame_limit = None
 
         # 连续扫描接口内部也会确认起点；这里先单独定位，
-        # 确保第一张软件触发图像就在扫描起点附近。
+        # 确保连续取流的第一张图像就在扫描起点附近。
         positioning_t0 = time.perf_counter()
         motion.move_to_position(
             search_start,
@@ -418,15 +416,17 @@ def _run_continuous_search(cfg) -> SearchResult:
                 )
             )
 
-        collector = SoftwareBestFrameCollector(
+        collector = ContinuousBestFrameCollector(
             cam,
             evaluator,
             evaluation_roi=cfg.evaluation_roi,
+            target_fps=cfg.continuous_capture_fps,
             cancel_event=cancel,
-            max_queue=cfg.soft_trigger_queue_size,
-            trigger_interval_s=cfg.soft_trigger_interval_s,
-            frame_timeout_s=cfg.soft_trigger_frame_timeout_s,
-            frame_limit=frame_limit,
+            max_queue=cfg.continuous_capture_queue_size,
+            first_frame_timeout_s=(
+                cfg.continuous_first_frame_timeout_s
+            ),
+            drain_timeout_s=cfg.continuous_drain_timeout_s,
             preview_callback=preview_callback,
         )
         collector_start_t0 = time.perf_counter()
@@ -434,6 +434,12 @@ def _run_continuous_search(cfg) -> SearchResult:
         ct["collector_start_ms"] = (
             time.perf_counter() - collector_start_t0
         ) * 1000
+
+        if not collector.wait_for_first_frame():
+            raise RuntimeError(
+                collector.error
+                or "连续采集首帧等待超时"
+            )
 
         scan_t0 = time.perf_counter()
         motion_result = motion.continuous_scan(
@@ -451,11 +457,59 @@ def _run_continuous_search(cfg) -> SearchResult:
             raise RuntimeError("用户取消")
 
         collector_stop_t0 = time.perf_counter()
-        collector.stop()
-        ct["collector_stop_ms"] = (
+        if not collector.stop_and_drain():
+            raise RuntimeError(
+                collector.error
+                or "连续采集停止后未能完成队列处理"
+            )
+        ct["collector_stop_and_drain_ms"] = (
             time.perf_counter() - collector_stop_t0
         ) * 1000
         best = collector.result()
+        ct["capture_received_count"] = int(
+            getattr(best, "received_count", 0)
+        )
+        ct["capture_enqueued_count"] = int(
+            getattr(best, "enqueued_count", 0)
+        )
+        ct["capture_processed_count"] = int(
+            getattr(best, "processed_count", 0)
+        )
+        ct["capture_dropped_count"] = int(
+            getattr(best, "dropped_count", 0)
+        )
+        ct["capture_queue_peak"] = int(
+            getattr(best, "queue_peak", 0)
+        )
+        ct["capture_configured_fps"] = float(
+            getattr(best, "configured_fps", cfg.continuous_capture_fps)
+        )
+        capture_resulting_fps = getattr(best, "resulting_fps", None)
+        if capture_resulting_fps is not None:
+            ct["capture_resulting_fps"] = float(capture_resulting_fps)
+        timings_ms = getattr(best, "timings_ms", {})
+        ct["capture_score_avg_ms"] = float(
+            timings_ms.get("score_avg_ms", 0.0)
+        )
+        resulting_fps_text = (
+            f"{capture_resulting_fps:.2f}fps"
+            if capture_resulting_fps is not None
+            else "未提供"
+        )
+        logger.info(
+            "连续采集统计：配置=%.2ffps，实际=%s，"
+            "收到=%d，入队=%d，处理=%d，拒绝=%d，"
+            "队列峰值=%d/%d，平均清晰度计算=%.2fms",
+            ct["capture_configured_fps"],
+            resulting_fps_text,
+            ct["capture_received_count"],
+            ct["capture_enqueued_count"],
+            ct["capture_processed_count"],
+            ct["capture_dropped_count"],
+            ct["capture_queue_peak"],
+            cfg.continuous_capture_queue_size,
+            ct["capture_score_avg_ms"],
+        )
 
         # 到这里最佳帧已经确定；从此处开始的回起点时间不计入对焦 CT。
         focus_end_t0 = time.perf_counter()
@@ -509,9 +563,12 @@ def _run_continuous_search(cfg) -> SearchResult:
         ) * 1000
 
         logger.info(
-            "连续精扫完成：帧数=%d，最佳帧=%d，清晰度=%.3f，"
-            "实际终点=%.3fµm，已回到起点=%dµm",
+            "连续精扫完成：收到=%d，处理=%d，队列峰值=%d，"
+            "最佳帧=%d，清晰度=%.3f，实际终点=%.3fµm，"
+            "已回到起点=%dµm",
+            ct["capture_received_count"],
             best.processed_count,
+            ct["capture_queue_peak"],
             best.best_index,
             best.best_score,
             motion_result.actual_end_um,
@@ -557,7 +614,9 @@ def _run_continuous_search(cfg) -> SearchResult:
     finally:
         if collector is not None:
             try:
-                collector.stop()
+                collector.stop_and_drain(
+                    timeout=cfg.continuous_drain_timeout_s
+                )
             except Exception:
                 logger.warning("连续精扫结束时停止采集器失败", exc_info=True)
         if cam is not None and not borrowed_camera:
@@ -568,7 +627,7 @@ def _run_continuous_search(cfg) -> SearchResult:
 
 
 def run_search(cfg) -> SearchResult:
-    """搜索入口：统一使用单次连续软件触发精扫。"""
+    """搜索入口：统一使用单次连续采集精扫。"""
 
     return _run_continuous_search(cfg)
 

@@ -247,7 +247,7 @@ class ParamPanel(QWidget):
         self.fine_half_spin.setRange(1, 100)
         self.fine_half_spin.setValue(5)
 
-        # 新版连续精扫参数：轴只从起点连续移动到终点，期间由软件触发采图。
+        # 新版连续精扫参数：轴单程扫描，期间相机自由运行连续采图。
         self.continuous_velocity_spin = QDoubleSpinBox()
         self.continuous_velocity_spin.setRange(1.0, 5000.0)
         self.continuous_velocity_spin.setDecimals(1)
@@ -256,18 +256,22 @@ class ParamPanel(QWidget):
         self.continuous_velocity_spin.setToolTip("起点到终点的连续运动速度")
 
         self.soft_trigger_interval_spin = QDoubleSpinBox()
-        self.soft_trigger_interval_spin.setRange(0.0, 1000.0)
+        self.soft_trigger_interval_spin.setRange(1.0, 200.0)
         self.soft_trigger_interval_spin.setDecimals(1)
-        self.soft_trigger_interval_spin.setValue(0.0)
-        self.soft_trigger_interval_spin.setSuffix(" ms")
-        self.soft_trigger_interval_spin.setToolTip("处理完上一帧后等待多久再触发下一帧")
+        self.soft_trigger_interval_spin.setValue(20.0)
+        self.soft_trigger_interval_spin.setSuffix(" fps")
+        self.soft_trigger_interval_spin.setToolTip(
+            "相机自由运行的目标采集帧率；实际帧率受曝光和带宽限制"
+        )
 
         self.soft_trigger_timeout_spin = QDoubleSpinBox()
         self.soft_trigger_timeout_spin.setRange(0.1, 10.0)
         self.soft_trigger_timeout_spin.setDecimals(1)
         self.soft_trigger_timeout_spin.setValue(1.0)
         self.soft_trigger_timeout_spin.setSuffix(" s")
-        self.soft_trigger_timeout_spin.setToolTip("单次软件触发等待回调的最长时间")
+        self.soft_trigger_timeout_spin.setToolTip(
+            "连续取流启动后，等待第一张图像到达的最长时间"
+        )
 
         self.save_edit = QLineEdit()
         self.save_edit.setPlaceholderText(
@@ -440,18 +444,18 @@ class ParamPanel(QWidget):
         )
         form.addRow(
             "运行方式:",
-            QLabel("连续软件触发精扫"),
+            QLabel("连续采集并行精扫"),
         )
         form.addRow(
             "连续运动速度:",
             self.continuous_velocity_spin,
         )
         form.addRow(
-            "软触发间隔:",
+            "连续采集帧率:",
             self.soft_trigger_interval_spin,
         )
         form.addRow(
-            "单帧回调超时:",
+            "首帧等待超时:",
             self.soft_trigger_timeout_spin,
         )
         form.addRow(
