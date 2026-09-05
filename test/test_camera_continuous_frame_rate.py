@@ -6,9 +6,10 @@ from camera.camera_adapter import HikCamera
 
 
 class _FakeCameraSdk:
-    def __init__(self):
+    def __init__(self, include_increment=True):
         self.acquisition_rate = 20.0
         self.resulting_rate = 18.5
+        self.include_increment = include_increment
         self.frame_rate_enabled = False
         self.last_set_rate = None
 
@@ -16,13 +17,13 @@ class _FakeCameraSdk:
         if node_name == "AcquisitionFrameRate":
             value.fMin = 1.0
             value.fMax = 60.0
-            value.fInc = 0.5
+            if self.include_increment:
+                value.fInc = 0.5
             value.fCurValue = self.acquisition_rate
             return 0
         if node_name == "ResultingFrameRate":
             value.fMin = 0.0
             value.fMax = 60.0
-            value.fInc = 0.0
             value.fCurValue = self.resulting_rate
             return 0
         return 1
@@ -67,6 +68,15 @@ class ContinuousFrameRateTests(unittest.TestCase):
 
         self.assertTrue(self.sdk.frame_rate_enabled)
         self.assertEqual(30.0, self.sdk.last_set_rate)
+        self.assertEqual(30.0, actual.configured_fps)
+
+    def test_supports_mvs_float_structure_without_increment_field(self):
+        self.sdk.include_increment = False
+
+        info = self.camera.get_continuous_frame_rate_info()
+        actual = self.camera.set_continuous_frame_rate(30.0)
+
+        self.assertEqual(0.0, info.increment_fps)
         self.assertEqual(30.0, actual.configured_fps)
 
     def test_rejects_unsupported_rate_and_setting_while_grabbing(self):

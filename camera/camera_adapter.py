@@ -454,7 +454,10 @@ class HikCamera:
         return ContinuousFrameRateInfo(
             minimum_fps=float(configured.fMin),
             maximum_fps=float(configured.fMax),
-            increment_fps=float(configured.fInc),
+            # 当前项目随 MVS 提供的 MVCC_FLOATVALUE 只有当前值、
+            # 最小值和最大值；部分 SDK 版本才额外暴露 fInc。步进
+            # 缺失不影响读写帧率，因此按未知步进（0.0）兼容处理。
+            increment_fps=float(getattr(configured, "fInc", 0.0)),
             configured_fps=float(configured.fCurValue),
             resulting_fps=resulting_fps,
         )
@@ -553,7 +556,9 @@ class HikCamera:
 
         actual = self.get_continuous_frame_rate_info()
         # 相机可能按其节点步进做量化；半个步进以内即表示读回正确。
-        tolerance = max(actual.increment_fps / 2.0, 0.001)
+        # MVS 的常用 Python SDK 没有 fInc 字段时，以 0.01fps 作为
+        # 浮点读回误差下限，避免因 SDK 结构差异中断连续采集。
+        tolerance = max(actual.increment_fps / 2.0, 0.01)
 
         if abs(actual.configured_fps - requested_fps) > tolerance:
             raise RuntimeError(
