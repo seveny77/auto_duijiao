@@ -40,6 +40,27 @@ $env:AUTOFOCUS_YOLO_DEVICE = "cpu"  # 强制 CPU
 
 Ultralytics 联网统计由应用在模型导入时关闭；工控机推理不依赖外网。
 
+## 从现有 Python 3.13 迁移到 3.12 CUDA
+
+退出自动对焦 GUI，在项目根目录执行以下命令。两个模型参数必须填写工控机
+上的实际绝对路径：
+
+```powershell
+powershell -ExecutionPolicy Bypass `
+  -File deploy\migrate_python312_cuda.ps1 `
+  -SegmentationModel "C:\模型\分割\best.pt" `
+  -CircleModel "C:\模型\找圆\best.pt"
+```
+
+脚本在 `runtime\venvs\autofocus-py312` 创建独立环境，依次验证 Python
+3.12、CUDA 张量运算、找圆模型推理和分割模型推理。原来的
+`runtime\venvs\autofocus` 不会被删除或修改。只有看到
+`PYTHON312_CUDA_READY` 后，才使用下面的入口启动软件：
+
+```powershell
+deploy\start_gui_py312.cmd
+```
+
 普通依赖和 CUDA 依赖必须分开安装，避免 pip 用 PyTorch 索引查询
 PyQt5、OpenCV 等普通包。
 
