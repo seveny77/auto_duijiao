@@ -18,13 +18,40 @@ $torchRequirements = Join-Path $rootPath "deploy\requirements-torch-cu128.txt"
 $smokeScript = Join-Path $rootPath "tools\smoke_yolo_gpu.py"
 $launcherPath = Join-Path $rootPath "deploy\start_gui_py312.cmd"
 
+$modelInputs = @(
+    [PSCustomObject]@{
+        Label = "Segmentation model"
+        Value = $SegmentationModel
+    },
+    [PSCustomObject]@{
+        Label = "Circle model"
+        Value = $CircleModel
+    }
+)
+
+foreach ($modelInput in $modelInputs) {
+    if ([string]::IsNullOrWhiteSpace($modelInput.Value)) {
+        throw "$($modelInput.Label) path is empty"
+    }
+
+    $modelPath = [IO.Path]::GetFullPath($modelInput.Value)
+    if (-not (Test-Path -LiteralPath $modelPath -PathType Leaf)) {
+        throw @"
+$($modelInput.Label) does not exist on this computer: $modelPath
+The path may have come from gui\inspection_config.json on another computer.
+Locate or copy the trained .pt file onto this computer, then pass its local path explicitly.
+"@
+    }
+}
+
+$segmentationModelPath = [IO.Path]::GetFullPath($SegmentationModel)
+$circleModelPath = [IO.Path]::GetFullPath($CircleModel)
+
 foreach ($requiredPath in @(
     $condaExe,
     $runtimeRequirements,
     $torchRequirements,
-    $smokeScript,
-    [IO.Path]::GetFullPath($SegmentationModel),
-    [IO.Path]::GetFullPath($CircleModel)
+    $smokeScript
 )) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Required file does not exist: $requiredPath"
@@ -69,8 +96,8 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Output "Running real-model CUDA smoke test"
 & $pythonExe $smokeScript `
-    --segmentation-model ([IO.Path]::GetFullPath($SegmentationModel)) `
-    --circle-model ([IO.Path]::GetFullPath($CircleModel)) `
+    --segmentation-model $segmentationModelPath `
+    --circle-model $circleModelPath `
     --device 0
 if ($LASTEXITCODE -ne 0) {
     throw "CUDA smoke test failed; the existing Python 3.13 environment was not changed"

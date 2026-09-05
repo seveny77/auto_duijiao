@@ -9,6 +9,13 @@ import time
 from pathlib import Path
 
 
+# 直接执行 tools 下的脚本时，sys.path[0] 是 tools，而不是项目根目录。
+# 显式加入项目根，确保从任意工作目录启动都能导入 backend。
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="验证工控机 YOLO GPU 推理环境")
     parser.add_argument("--segmentation-model", required=True)
