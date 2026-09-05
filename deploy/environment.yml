@@ -2,5 +2,7 @@ name: autofocus
 channels:
   - defaults
 dependencies:
-  - python=3.13
+  # Windows CPython 3.13 + PyTorch 2.7.1 CUDA can terminate inside a Qt worker
+  # thread. Python 3.12 is the production runtime for GPU inference.
+  - python=3.12
   - pip

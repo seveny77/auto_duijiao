@@ -1,16 +1,23 @@
 # -*- coding: utf-8 -*-
 """端面圆 YOLO 检测模型的延迟加载、预热和候选输出。"""
 
+import logging
 import math
 import os
 import time
 from typing import Callable, Optional
 
 from backend.inspection_types import CircleCandidate
+from backend.ultralytics_runtime import (
+    device_predict_kwargs,
+    load_yolo_class,
+    resolve_yolo_device,
+)
 
 
 # 找圆只需要端面的大致位置；固定最长边可避免大图直接进入 YOLO。
 INFERENCE_LONGEST_SIDE = 1024
+logger = logging.getLogger(__name__)
 
 
 class CircleModelService:
@@ -22,6 +29,7 @@ class CircleModelService:
         self._model_path = ""
         self._load_ms = 0.0
         self._warmup_ms = 0.0
+        self._device = None
 
     @property
     def is_loaded(self) -> bool:
@@ -38,6 +46,10 @@ class CircleModelService:
     @property
     def warmup_ms(self) -> float:
         return self._warmup_ms
+
+    @property
+    def device(self) -> Optional[str]:
+        return self._device
 
     def load(self, model_path: str, *, confidence_floor: float):
         """在后台线程加载并预热普通 YOLO 检测模型。"""
@@ -59,8 +71,14 @@ class CircleModelService:
         factory = self._model_factory
         if factory is None:
             # 仅在用户明确加载模型时导入，避免启动软件时初始化 Torch/CUDA。
-            from ultralytics import YOLO
-            factory = YOLO
+            factory = load_yolo_class()
+
+        device = resolve_yolo_device()
+        if device == "cpu":
+            logger.warning(
+                "当前 Windows Python 版本使用 CPU 执行找圆推理；"
+                "设置 AUTOFOCUS_YOLO_DEVICE=0 可显式启用首张 CUDA 设备"
+            )
 
         load_start = time.perf_counter()
         candidate = factory(path)
@@ -78,6 +96,7 @@ class CircleModelService:
             conf=float(confidence_floor),
             max_det=20,
             verbose=False,
+            **device_predict_kwargs(device),
         )
         warmup_ms = (time.perf_counter() - warmup_start) * 1000.0
 
@@ -85,6 +104,7 @@ class CircleModelService:
         self._model_path = path
         self._load_ms = load_ms
         self._warmup_ms = warmup_ms
+        self._device = device
         return self._model
 
     def predict_circles(
@@ -131,6 +151,7 @@ class CircleModelService:
             conf=float(confidence_floor),
             max_det=max(20, expected_count),
             verbose=False,
+            **device_predict_kwargs(self._device),
         )
         if results is None or len(results) != 1:
             raise RuntimeError("找圆模型必须为单张输入返回一个结果")
@@ -184,6 +205,7 @@ class CircleModelService:
     def unload_for_shutdown(self):
         self._model = None
         self._model_path = ""
+        self._device = None
 
 
 def _validate_confidence(value: float):

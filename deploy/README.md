@@ -29,6 +29,17 @@ conda run -n autofocus python -m pip install -r deploy\requirements-runtime.txt
 conda run -n autofocus python -m pip install -r deploy\requirements-torch-cu128.txt
 ```
 
+部署环境固定为 Python 3.12。已有 Python 3.13 环境会自动回退为 CPU 推理，
+避免 PyTorch CUDA 在 Qt 工作线程中造成进程级崩溃。重建 3.12 环境后默认
+恢复 Ultralytics 的 CUDA 自动选择。也可在完成独立诊断后临时显式指定设备：
+
+```powershell
+$env:AUTOFOCUS_YOLO_DEVICE = "0"    # 首张 CUDA 设备
+$env:AUTOFOCUS_YOLO_DEVICE = "cpu"  # 强制 CPU
+```
+
+Ultralytics 联网统计由应用在模型导入时关闭；工控机推理不依赖外网。
+
 普通依赖和 CUDA 依赖必须分开安装，避免 pip 用 PyTorch 索引查询
 PyQt5、OpenCV 等普通包。
 

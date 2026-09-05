@@ -68,9 +68,15 @@ class InspectionWorker(QObject):
                 "class_names": self._segmentation_service.class_names,
                 "load_ms": self._segmentation_service.load_ms,
                 "warmup_ms": self._segmentation_service.warmup_ms,
+                "inference_device": getattr(
+                    self._segmentation_service, "device", None
+                ),
                 "circle_model_path": self._circle_model_service.model_path,
                 "circle_load_ms": self._circle_model_service.load_ms,
                 "circle_warmup_ms": self._circle_model_service.warmup_ms,
+                "circle_inference_device": getattr(
+                    self._circle_model_service, "device", None
+                ),
             }
             self.model_loaded.emit(
                 self._segmentation_service.model_path,
@@ -106,6 +112,7 @@ class InspectionWorker(QObject):
                 self.inspection_image_save_failed.emit(task_id, _error_message(error))
             else:
                 self.inspection_image_saved.emit(task_id, output_path)
+
     @pyqtSlot(str, object, object, object, object)
     def redetect_circle(self, task_id: str, image, source_result, config, original_image_path=None):
         """重新找圆后按新 ROI 重跑分割，避免复用已经错位的局部结果。"""

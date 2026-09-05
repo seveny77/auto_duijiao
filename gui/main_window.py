@@ -396,6 +396,12 @@ class MainWindow(QMainWindow):
         self.inspection_panel.set_model_loaded(model_path, metadata)
         self._log(f"[检测] 语义分割模型已加载: {model_path}")
         if isinstance(metadata, dict):
+            segmentation_device = metadata.get("inference_device") or "自动选择"
+            circle_device = metadata.get("circle_inference_device") or "自动选择"
+            self._log(
+                f"[检测] 推理设备: 分割={segmentation_device}，"
+                f"找圆={circle_device}"
+            )
             self._log(
                 "[检测] 找圆模型已加载并预热（最长边 1024）: "
                 f"{metadata.get('circle_model_path', '')}"

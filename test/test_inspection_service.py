@@ -123,9 +123,10 @@ class InspectionServiceTest(unittest.TestCase):
         self.circle = FakeCircleDetector()
         self.engine = FakeRuleEngine()
         self.service = InspectionService(
-            self.segmentation,
-            self.circle,
-            self.engine,
+            segmentation_service=self.segmentation,
+            circle_model_service=FakeSegmentationService(),
+            circle_detector=self.circle,
+            rule_engine=self.engine,
         )
         self.config = InspectionConfig(
             inference_imgsz=640,
@@ -155,7 +156,9 @@ class InspectionServiceTest(unittest.TestCase):
         return predicate()
 
     def _load_model(self):
-        self.assertTrue(self.service.load_model("fake.pt", self.config))
+        self.assertTrue(self.service.load_model(
+            "fake.pt", "circle.pt", self.config
+        ))
         self.assertTrue(self._wait_until(
             lambda: self.service.state == InspectionState.READY,
         ))
@@ -171,7 +174,9 @@ class InspectionServiceTest(unittest.TestCase):
         failures = []
         self.service.model_load_failed.connect(failures.append)
         self.segmentation.fail_load = True
-        self.assertTrue(self.service.load_model("fake.pt", self.config))
+        self.assertTrue(self.service.load_model(
+            "fake.pt", "circle.pt", self.config
+        ))
         self.assertTrue(self._wait_until(lambda: len(failures) == 1))
 
         self.assertEqual(self.service.state, InspectionState.NOT_LOADED)

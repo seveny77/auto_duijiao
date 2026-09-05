@@ -8,6 +8,11 @@ import time
 from typing import Callable, Optional
 
 from backend.inspection_types import SegmentationInstance
+from backend.ultralytics_runtime import (
+    device_predict_kwargs,
+    load_yolo_class,
+    resolve_yolo_device,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +32,7 @@ class SegmentationModelService:
         self._class_names: dict[int, str] = {}
         self._load_ms = 0.0
         self._warmup_ms = 0.0
+        self._device = None
 
     @property
     def is_loaded(self) -> bool:
@@ -47,6 +53,10 @@ class SegmentationModelService:
     @property
     def warmup_ms(self) -> float:
         return self._warmup_ms
+
+    @property
+    def device(self) -> Optional[str]:
+        return self._device
 
     def load(
         self,
@@ -74,8 +84,14 @@ class SegmentationModelService:
         factory = self._model_factory
         if factory is None:
             # 只有用户明确加载模型时才导入 Ultralytics/Torch。
-            from ultralytics import YOLO
-            factory = YOLO
+            factory = load_yolo_class()
+
+        device = resolve_yolo_device()
+        if device == "cpu":
+            logger.warning(
+                "当前 Windows Python 版本使用 CPU 执行分割推理；"
+                "设置 AUTOFOCUS_YOLO_DEVICE=0 可显式启用首张 CUDA 设备"
+            )
 
         load_start = time.perf_counter()
         candidate = factory(path)
@@ -96,6 +112,7 @@ class SegmentationModelService:
             retina_masks=True,
             max_det=MAX_DETECTIONS_PER_IMAGE,
             verbose=False,
+            **device_predict_kwargs(device),
         )
         warmup_ms = (time.perf_counter() - warmup_start) * 1000.0
 
@@ -105,6 +122,7 @@ class SegmentationModelService:
         self._class_names = class_names
         self._load_ms = load_ms
         self._warmup_ms = warmup_ms
+        self._device = device
         return self._model
 
     def predict(
@@ -131,6 +149,7 @@ class SegmentationModelService:
             retina_masks=True,
             max_det=MAX_DETECTIONS_PER_IMAGE,
             verbose=False,
+            **device_predict_kwargs(self._device),
         )
         if results is None or len(results) != 1:
             raise RuntimeError("分割模型必须为单张输入返回一个结果")
@@ -144,6 +163,7 @@ class SegmentationModelService:
         self._model = None
         self._model_path = ""
         self._class_names = {}
+        self._device = None
 
 
 def _validate_inference_options(imgsz: int, confidence_floor: float):
