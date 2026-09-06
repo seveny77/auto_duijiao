@@ -121,13 +121,13 @@ img/roi_000002.jpg                 # 没有对应 JSON
 例如，源数据位于 `F:\项目\自动对焦\code\yoloSegSourceROI`，输出到新目录 `yoloSegData\roi_v1`：
 
 ```powershell
-E:\Users\Administrator\miniconda3\python.exe tools\prepare_segmentation_dataset.py `
-  --source "F:\项目\自动对焦\code\yoloSegSourceROI" `
-  --output "F:\项目\自动对焦\code\yoloSegData\roi_v1" `
+C:\Autofocus\runtime\venvs\autofocus\Scripts\python.exe tools\prepare_segmentation_dataset.py `
+  --source "C:\Seg\yoloSegMTF2" `
+  --output "C:\Seg\yoloSegMTFData" `
   --classes 异物 脏污 `
   --train-ratio 0.8 `
-  --val-ratio 0.1 `
-  --test-ratio 0.1 `
+  --val-ratio 0.19 `
+  --test-ratio 0.01 `
   --seed 42
 ```
 

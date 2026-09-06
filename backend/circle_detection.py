@@ -15,4 +15,5 @@ class YoloCircleDetector:
             image,
             expected_count=int(config.expected_circle_count),
             confidence_floor=float(config.confidence_floor),
+            min_box_aspect_ratio=float(config.min_box_aspect_ratio),
         )

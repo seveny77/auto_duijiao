@@ -19,6 +19,8 @@ class CircleDetectionConfig:
 
     model_path: str = ""
     confidence_floor: float = 0.25
+    # 候选检测框短边/长边的最低比例；0 表示不按长宽比过滤。
+    min_box_aspect_ratio: float = 0.75
     expected_circle_count: int = 1
 
 
@@ -158,6 +160,9 @@ def inspection_config_from_dict(payload: dict[str, Any]) -> InspectionConfig:
                 "min_candidate_score", circle_defaults.confidence_floor
             ),
         )),
+        min_box_aspect_ratio=float(circle_payload.get(
+            "min_box_aspect_ratio", circle_defaults.min_box_aspect_ratio
+        )),
         expected_circle_count=int(circle_payload.get(
             "expected_circle_count", circle_defaults.expected_circle_count
         )),
@@ -227,6 +232,10 @@ def _validate_circle_config(config: CircleDetectionConfig) -> list[str]:
         0 <= config.confidence_floor <= 1
     ):
         errors.append("找圆置信度下限必须在 0～1 之间")
+    if not math.isfinite(config.min_box_aspect_ratio) or not (
+        0 <= config.min_box_aspect_ratio <= 1
+    ):
+        errors.append("找圆候选框最小长宽比必须在 0～1 之间")
     return errors
 
 

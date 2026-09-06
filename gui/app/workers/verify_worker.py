@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 # ---------- 测试线程 ----------
 class VerifyWorker(QObject):
-    """在后台 QThread 中执行搜索或标定任务。"""
+    """在后台 QThread 中执行连续自动对焦任务。"""
 
     # 扫描过程预览：
     #
@@ -50,7 +50,7 @@ class VerifyWorker(QObject):
 
     @pyqtSlot(object)
     def run(self, config):
-        """在后台线程中执行搜索或标定。"""
+        """在后台线程中执行连续自动对焦。"""
 
         # 把 Qt 预览信号的 emit 方法作为普通回调注入后端。
         #
@@ -72,15 +72,9 @@ class VerifyWorker(QObject):
         )
 
         try:
-            from verify_ncc_full import (
-                run_calibrate,
-                run_search,
-            )
+            from backend.pipeline import run_search
 
-            if config.action == "calibrate":
-                result = run_calibrate(config)
-            else:
-                result = run_search(config)
+            result = run_search(config)
 
             self.finished.emit(result)
 
@@ -101,16 +95,9 @@ class VerifyWorker(QObject):
             # 后台任务出现异常，需要切换界面状态。
             self.error.emit(short_message)
 
-            action_name = getattr(
-                config,
-                "action",
-                "unknown",
-            )
-
             # 自动记录当前异常的完整 traceback。
             logger.exception(
-                "后台任务异常调用栈: action=%s",
-                action_name,
+                "连续自动对焦后台任务异常调用栈"
             )
 
         finally:

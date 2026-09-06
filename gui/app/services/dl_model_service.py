@@ -109,8 +109,7 @@ class DLModelService:
         try:
             # 延迟导入 PyTorch 模型模块。
             #
-            # GUI 启动且用户只使用 NCC 时，
-            # 不需要因为导入本服务而立即初始化 PyTorch。
+            # 仅在用户显式请求 AI 对焦实验功能时导入 PyTorch。
             from backend.dl_focus_model import (
                 DLDistanceModel,
             )

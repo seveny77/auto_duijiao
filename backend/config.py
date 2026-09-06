@@ -1,107 +1,44 @@
-# backend/config.py
-"""对焦任务参数：GUI 与后端之间的类型化契约。"""
+"""连续自动对焦任务的类型化配置。"""
 
-from dataclasses import dataclass, field
-from typing import Optional,Callable
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 from backend.focus_roi import EvaluationRoi
 
-# 预览回调的参数约定：
-#
-# callback(
-#     image,       # NumPy/OpenCV 图像
-#     phase,       # calibrate / coarse / fine
-#     sequence,    # 当前阶段中的帧序号
-#     score,       # 当前帧清晰度得分
-# )
-PreviewCallback = Callable[
-    [object, str, int, float],
-    None,
-]
 
-# 最佳帧确定后、轴回起点前调用。参数为 backend.result.BestFrameReady。
+PreviewCallback = Callable[[object, str, int, float], None]
 BestFrameReadyCallback = Callable[[object], None]
+
 
 @dataclass
 class FocusConfig:
-    """字段与 verify_ncc_full 的 parser 参数一一对应，默认值与 parser 一致。"""
+    """一轮连续精扫所需的配置与运行期依赖。"""
 
-    action: str = "search"                     # search / calibrate
-    mode: str = "real"                         # real / sim
-    strategy: str = "ncc"
-    template: str = "data/template.json"
-
-    # AI对焦策略参数。
-    dl_model: str = "assets/models/ai/best_resnet.pt"
-    shot_position_um: Optional[int] = None
-    dl_max_abs_delta_um: float = 600.0
-
+    mode: str = "real"  # real / sim
     camera_index: int = 0
-
     search_start_um: int = 9500
     search_span_um: int = 2000
-    coarse_step_um: int = 100
-    fine_step_um: int = 5
-    fine_half_steps: int = 5
-    ncc_min_score: float = 0.5
-
-    calibrate_step_um: int = 5
-    calibrate_start_um: Optional[int] = None
-    calibrate_span_um: Optional[int] = None
-    calibrate_images: Optional[str] = None
-    calibrate_downsample: Optional[str] = None
-    calibrate_factor: Optional[int] = None
-
-    exposure_us: int = 12000
-    coarse_exposure_us: int = 0
+    continuous_scan_velocity_um_s: float = 50.0
+    exposure_us: int = 3000
     gain_db: float = 0.0
-    coarse_binning: int = 4
-    coarse_downsample: str = "decimation"
-    fine_binning: int = 1
-    # 标定、粗扫、精扫、最终成像共用的初始工作窗口。
-    # 单位为未降采样的传感器像素；宽高同时为 0 表示使用全幅。
-    # 第一版固定在传感器中心，不单独配置 OffsetX/OffsetY。
+    # 全分辨率传感器坐标；宽高均为 0 表示全幅。
     work_roi_width_px: int = 0
     work_roi_height_px: int = 0
-    # 清晰度评价 ROI，坐标相对于相机硬件 ROI 输出图像左上角。
-    # None 表示第一张图到达后自动使用整张硬件 ROI 图像。
+    camera_decimation: int = 1
+    # 相对于硬件 ROI 输出图像左上角；None 表示整张图。
     evaluation_roi: Optional[EvaluationRoi] = None
-    detect_model: str = "assets/models/yolo/best.pt"
-    detect_conf: float = 0.5
-    roi_fallback_size: int = 300
-
-    save_dir: Optional[str] = None
-    save_images: Optional[str] = None
-    save_all: bool = False
-    flyscan_timeout: float = 600.0
-    frame_wait_timeout: float = 60.0
-    final_frame_timeout: float = 3.0
-    # 旧版连续精扫的软件触发参数暂保留，方便必要时回退旧实现。
-    soft_trigger_interval_s: float = 0.0
-    soft_trigger_frame_timeout_s: float = 1.0
-    soft_trigger_queue_size: int = 2
-    # 新版连续精扫：相机自由运行，回调采集与清晰度评价并行。
     continuous_capture_fps: float = 20.0
-    continuous_capture_queue_size: int = 4
+    continuous_capture_queue_size: int = 30
     continuous_first_frame_timeout_s: float = 1.0
     continuous_drain_timeout_s: float = 5.0
-    continuous_scan_velocity_um_s: float = 50.0
+    flyscan_timeout: float = 600.0
+    save_dir: Optional[str] = None
     yes: bool = False
 
-    cancel_event: Optional[object] = None      # 运行期注入：停止开关
-    detect_model_obj: Optional[object] = None  # 运行期注入：已加载的 YOLO
-    dl_model_obj: Optional[object] = None      # 运行期注入：已经加载和预热的AI对焦模型。
-    # 运行期注入：GUI的MotionService持有已连接的运动后端。
-    # Pipeline只借用它执行本轮任务，不负责连接或断开。
+    # 由 GUI 在任务提交前注入，不写入 config.json。
+    cancel_event: Optional[object] = None
     motion_backend: Optional[object] = None
-    # 运行期注入：GUI的CameraService持有的常驻相机句柄。
-    # Pipeline只借用它执行本轮任务，结束后保持打开（省每轮
-    # open的~500ms）；为None时Pipeline自行open/close（CLI路径）。
     camera: Optional[object] = None
-    # CLI 或无界面运行时保持 None，不产生任何预览开销。
-    # image, phase, sequence, score
     preview_callback: Optional[PreviewCallback] = None
-    # 连续精扫最佳帧已确定，但运动任务尚未结束时的通知回调。
     best_frame_ready_callback: Optional[BestFrameReadyCallback] = None
-    # 0.1 秒代表最多每秒发送 10 张预览图。
     preview_interval_s: float = 0.1

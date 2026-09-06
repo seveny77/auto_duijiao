@@ -9,7 +9,6 @@ from gui.app.services.qt_log_handler import (
 )
 import os
 from gui.app.widgets.image_view import ImageWidget
-from gui.app.widgets.curve_panel import CurvePanel
 from gui.app.widgets.log_panel import LogPanel
 from gui.app.widgets.inspection_panel import InspectionPanel
 from gui.app.services.config_service import ConfigService
@@ -27,7 +26,6 @@ from gui.app.services.camera_service import CameraService
 from gui.app.services.live_view_service import LiveViewService
 from gui.app.services.focus_task_service import FocusTaskService
 from gui.app.services.focus_run_service import FocusRunService
-from gui.app.services.detection_model_service import DetectionModelService
 from gui.app.services.application_shutdown_service import (
     ApplicationShutdownService,
 )
@@ -49,12 +47,6 @@ from PyQt5.QtWidgets import (
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # gui/ 的上级 = 项目根
 
-
-def _resolve_path(path: str) -> str:
-    """相对路径 → 以项目根为基准的绝对路径"""
-    if path and not os.path.isabs(path):
-        return os.path.join(PROJECT_ROOT, path)
-    return path
 
 class MainWindow(QMainWindow):
     """自动对焦系统主窗口。"""
@@ -84,25 +76,14 @@ class MainWindow(QMainWindow):
             status_fn=self.status_message.emit,
         )
 
-        self.ct_logger = CtLogger()
-
         self.result_presenter = ResultPresenter(
             image_widget=self.image_widget,
-            curve_panel=self.curve_panel,
-            ct_logger=self.ct_logger,
+            ct_logger=CtLogger(message_fn=self._log),
             controller=self.controller,
             message_fn=self._log,
             status_fn=self.status_message.emit,
-            template_path_fn=lambda: _resolve_path(
-                self.param_panel.template_edit.text().strip()
-            ),
         )
         self.focus_task_service = FocusTaskService()
-
-        self.detection_model_service = DetectionModelService(
-            project_root=PROJECT_ROOT,
-        )
-        self.detection_model_service.load()
 
         self.live_view_service = LiveViewService(
             project_root=PROJECT_ROOT,
@@ -168,7 +149,6 @@ class MainWindow(QMainWindow):
             focus_task_service=self.focus_task_service,
             live_view_service=self.live_view_service,
             result_presenter=self.result_presenter,
-            detection_model_service=self.detection_model_service,
             stroke_range_fn=lambda: self.motion_service.stroke_range,
             motion_backend_fn=lambda: self.motion_service.backend,
             motion_state_fn=lambda: self.motion_service.state,
@@ -228,6 +208,12 @@ class MainWindow(QMainWindow):
         )
         self.inspection_panel.original_image_save_failed.connect(
             lambda message: self._log(f"[检测] 原始最终图保存失败: {message}")
+        )
+        self.inspection_panel.inspection_image_saved.connect(
+            lambda path: self._log(f"[检测] 当前检测结果图已保存: {path}")
+        )
+        self.inspection_panel.inspection_image_save_failed.connect(
+            lambda message: self._log(f"[检测] 当前检测结果图保存失败: {message}")
         )
         self.inspection_panel.inspection_recalculate_requested.connect(
             self._on_inspection_recalculate
@@ -296,9 +282,6 @@ class MainWindow(QMainWindow):
         )
         self.param_panel.motion_stop_btn.clicked.connect(
             lambda _checked=False: self.motion_service.stop_motion()
-        )
-        self.param_panel.template_load_btn.clicked.connect(
-            lambda _checked=False: self.result_presenter.load_template()
         )
         self.param_panel.start_btn.clicked.connect(
             lambda _checked=False: self._start_focus_task()
@@ -970,11 +953,6 @@ class MainWindow(QMainWindow):
 
         self.image_widget = ImageWidget()
         top.addWidget(self.image_widget, 1) # 图像区，数字 1 = 占满剩余空间
-
-        self.curve_panel = CurvePanel()
-        # 新版连续精扫不再显示 NCC 清晰度曲线。
-        # 保留对象供 ResultPresenter 和旧标定/NCC 兼容代码调用，
-        # 但不把它加入主布局，避免占用图像视图空间。
 
         self.main_tabs.addTab(focus_page, "对焦过程")
 

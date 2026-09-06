@@ -113,6 +113,7 @@ class CircleModelService:
         *,
         expected_count: int,
         confidence_floor: float,
+        min_box_aspect_ratio: float = 0.0,
     ) -> tuple[list[CircleCandidate], Optional[int], bool, list[str]]:
         """推理并按置信度选前 N 个，再按位置赋予稳定顺序。"""
 
@@ -121,6 +122,7 @@ class CircleModelService:
         if expected_count < 1:
             raise ValueError("预期圆数量必须至少为 1")
         _validate_confidence(confidence_floor)
+        _validate_min_box_aspect_ratio(min_box_aspect_ratio)
 
         import cv2
         import numpy as np
@@ -167,6 +169,7 @@ class CircleModelService:
             raise RuntimeError("找圆模型输出框字段数量不一致")
 
         candidates = []
+        aspect_filtered_count = 0
         for box, confidence, class_id in zip(xyxy_values, confidence_values, class_values):
             if int(class_id) != 0 or len(box) != 4:
                 # 当前训练集只有 autofocus/0 类。忽略其他类以防选错模型。
@@ -175,6 +178,12 @@ class CircleModelService:
             box_width = max(0.0, x2 - x1)
             box_height = max(0.0, y2 - y1)
             if box_width <= 0 or box_height <= 0:
+                continue
+            aspect_ratio = min(box_width, box_height) / max(
+                box_width, box_height
+            )
+            if aspect_ratio < min_box_aspect_ratio:
+                aspect_filtered_count += 1
                 continue
             candidates.append(CircleCandidate(
                 center_x=(x1 + x2) * 0.5,
@@ -188,6 +197,11 @@ class CircleModelService:
         detected_count = len(candidates)
         selected = candidates[:expected_count]
         warnings: list[str] = []
+        if aspect_filtered_count:
+            warnings.append(
+                "深度学习找圆按候选框长宽比过滤 "
+                f"{aspect_filtered_count} 个候选（阈值={min_box_aspect_ratio:.3f}）"
+            )
         if detected_count != expected_count:
             warnings.append(
                 f"预期检测到 {expected_count} 个圆，"
@@ -211,6 +225,11 @@ class CircleModelService:
 def _validate_confidence(value: float):
     if not math.isfinite(float(value)) or not 0 <= float(value) <= 1:
         raise ValueError("找圆置信度下限必须在 0～1 之间")
+
+
+def _validate_min_box_aspect_ratio(value: float):
+    if not math.isfinite(float(value)) or not 0 <= float(value) <= 1:
+        raise ValueError("找圆候选框最小长宽比必须在 0～1 之间")
 
 
 def _to_list(value):

@@ -38,25 +38,8 @@ class _ValueWidget:
         self._value = bool(value)
 
 
-class _Tabs:
-    def __init__(self):
-        self._index = 0
-
-    def currentIndex(self):
-        return self._index
-
-    def setCurrentIndex(self, value):
-        self._index = value
-
-
 class _Panel:
-    ncc_tab_index = 0
-    ai_tab_index = 1
-
     def __init__(self):
-        self.strategy_tabs = _Tabs()
-        self.action_combo = _ValueWidget("搜索对焦")
-        self.ncc_action_combo = _ValueWidget("NCC搜索")
         self.mode_combo = _ValueWidget("真实")
         self.skip_confirm_check = _ValueWidget(True)
         self.exposure_spin = _ValueWidget(3000)
@@ -66,15 +49,10 @@ class _Panel:
         self.work_roi_height_spin = _ValueWidget(480)
         self.search_start_spin = _ValueWidget(9500)
         self.search_span_spin = _ValueWidget(2000)
-        self.fine_step_spin = _ValueWidget(5)
-        self.fine_half_spin = _ValueWidget(5)
-        self.coarse_step_spin = _ValueWidget(100)
         self.save_edit = _ValueWidget("")
-        self.template_edit = _ValueWidget("data/template_sim.json")
-        self.calibrate_step_spin = _ValueWidget(20)
-        self.calibrate_ds_combo = _ValueWidget("decimation 4")
-        self.dl_model_edit = _ValueWidget("assets/models/ai/best_resnet.pt")
-        self.shot_position_spin = _ValueWidget(12000)
+        self.continuous_velocity_spin = _ValueWidget(50.0)
+        self.soft_trigger_interval_spin = _ValueWidget(20.0)
+        self.soft_trigger_timeout_spin = _ValueWidget(1.0)
 
 
 class _ImageWidget:

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 每个端面 ROI 的单次推理最多保留 20 个缺陷实例，防止高纹理图像
 # 触发 Ultralytics 默认的 300 个结果上限并给 CUDA/GUI 带来额外压力。
-MAX_DETECTIONS_PER_IMAGE = 20
+MAX_DETECTIONS_PER_IMAGE = 40
 
 
 class SegmentationModelService:

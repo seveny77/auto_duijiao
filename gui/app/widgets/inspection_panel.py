@@ -63,6 +63,8 @@ class InspectionPanel(QWidget):
     circle_confirmation_requested = pyqtSignal(object)
     original_image_saved = pyqtSignal(str)
     original_image_save_failed = pyqtSignal(str)
+    inspection_image_saved = pyqtSignal(str)
+    inspection_image_save_failed = pyqtSignal(str)
     focus_start_requested = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -442,6 +444,9 @@ class InspectionPanel(QWidget):
             self.circle_confidence_spin.setValue(
                 float(config.circle.confidence_floor)
             )
+            self.circle_min_aspect_ratio_spin.setValue(
+                float(config.circle.min_box_aspect_ratio)
+            )
             self.expected_circle_count_spin.setValue(
                 int(config.circle.expected_circle_count)
             )
@@ -498,6 +503,9 @@ class InspectionPanel(QWidget):
         config.mm_per_pixel = float(self.mm_per_pixel_spin.value())
         config.circle.confidence_floor = float(
             self.circle_confidence_spin.value()
+        )
+        config.circle.min_box_aspect_ratio = float(
+            self.circle_min_aspect_ratio_spin.value()
         )
         config.circle.expected_circle_count = int(
             self.expected_circle_count_spin.value()
@@ -1268,15 +1276,18 @@ class InspectionPanel(QWidget):
         self._image_view._zoom_steps = 0
 
     def _show_original_image_context_menu(self, position):
-        """在检测图像上提供原始最终图保存入口。"""
+        """在检测图像上提供原图和当前检测结果图保存入口。"""
 
         if self._original_image is None:
             return
         menu = QMenu(self)
-        save_action = menu.addAction("保存原始最终图…")
+        save_original_action = menu.addAction("保存原始最终图…")
+        save_inspection_action = menu.addAction("保存当前检测结果图…")
         selected_action = menu.exec_(self._image_view.mapToGlobal(position))
-        if selected_action is save_action:
+        if selected_action is save_original_action:
             self._save_original_image()
+        elif selected_action is save_inspection_action:
+            self._save_current_inspection_image()
 
     def _save_original_image(self):
         """以最高质量 JPEG 保存未绘制的原始最终图。"""
@@ -1319,6 +1330,42 @@ class InspectionPanel(QWidget):
             self.original_image_saved.emit(str(output_path))
         except (OSError, RuntimeError, ValueError) as error:
             self.original_image_save_failed.emit(str(error))
+
+    def _save_current_inspection_image(self):
+        """保存当前检测视图对应的全分辨率叠加图，不包含 GUI 控件。"""
+
+        pixmap = self._image_item.pixmap()
+        if pixmap.isNull():
+            self.inspection_image_save_failed.emit("当前没有可保存的检测结果图")
+            return
+
+        default_name = datetime.now().strftime(
+            "inspection_result_%Y%m%d_%H%M%S.jpg"
+        )
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "保存当前检测结果图",
+            default_name,
+            "JPEG 图像 (*.jpg *.jpeg)",
+        )
+        if not path:
+            return
+
+        output_path = Path(path)
+        if not output_path.suffix:
+            output_path = output_path.with_suffix(".jpg")
+        if output_path.suffix.lower() not in {".jpg", ".jpeg"}:
+            self.inspection_image_save_failed.emit(
+                "检测结果图仅支持保存为 JPG/JPEG"
+            )
+            return
+
+        try:
+            if not pixmap.save(str(output_path), "JPG", 100):
+                raise RuntimeError("JPEG 编码失败")
+            self.inspection_image_saved.emit(str(output_path))
+        except (OSError, RuntimeError, ValueError) as error:
+            self.inspection_image_save_failed.emit(str(error))
 
     def _update_result_summary(self, task_id: str, result):
         status_value = getattr(getattr(result, "status", None), "value", "")
@@ -1450,6 +1497,14 @@ class InspectionPanel(QWidget):
         self.circle_confidence_spin.setDecimals(3)
         self.circle_confidence_spin.setSingleStep(0.05)
         self.circle_confidence_spin.setValue(0.25)
+        self.circle_min_aspect_ratio_spin = QDoubleSpinBox()
+        self.circle_min_aspect_ratio_spin.setRange(0.0, 1.0)
+        self.circle_min_aspect_ratio_spin.setDecimals(3)
+        self.circle_min_aspect_ratio_spin.setSingleStep(0.05)
+        self.circle_min_aspect_ratio_spin.setValue(0.75)
+        self.circle_min_aspect_ratio_spin.setToolTip(
+            "候选框短边÷长边低于此值时忽略；0 表示关闭该过滤。"
+        )
         self.circle_candidate_combo = QComboBox()
         self.circle_candidate_combo.addItem("尚无候选圆")
         self.circle_candidate_combo.setEnabled(False)
@@ -1460,6 +1515,7 @@ class InspectionPanel(QWidget):
         self.confirm_circle_btn = QPushButton("确认当前圆心")
         layout.addRow("预期圆数量：", self.expected_circle_count_spin)
         layout.addRow("最低置信度：", self.circle_confidence_spin)
+        layout.addRow("最小框长宽比：", self.circle_min_aspect_ratio_spin)
         layout.addRow("候选圆：", self.circle_candidate_combo)
         layout.addRow(self.find_circle_btn)
         layout.addRow(self.confirm_circle_btn)
