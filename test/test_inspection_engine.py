@@ -183,6 +183,22 @@ class InspectionEngineTest(unittest.TestCase):
         self.assertEqual(result.status, InspectionStatus.PASS)
         self.assertAlmostEqual(result.region_results[0].total_area_mm2, 2000.0)
 
+    def test_region_rule_counts_all_classes_together(self):
+        rule = _rule(
+            "center", "中心区", 0.0, 5.0,
+            class_id=-1,
+            class_name="全部缺陷",
+            max_instance_count=1,
+        )
+        result = self.evaluate([
+            _instance(120.0, 100.0, class_id=0),
+            _instance(130.0, 100.0, class_id=1),
+        ], region_rules=[rule])
+
+        self.assertEqual(result.region_results[0].class_id, -1)
+        self.assertEqual(result.region_results[0].valid_instance_count, 2)
+        self.assertEqual(result.status, InspectionStatus.FAIL)
+
     def test_reevaluate_reuses_inference_and_circle_outputs(self):
         instances = [
             _instance(120.0, 100.0),

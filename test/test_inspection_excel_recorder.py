@@ -76,12 +76,14 @@ class InspectionExcelRecorderTest(unittest.TestCase):
             path = recorder.append(
                 single,
                 completed_at=timestamp,
+                material_number="M-001",
                 original_image_path=str(Path(directory) / "single.jpg"),
                 record_id="SINGLE-001",
             )
             recorder.append(
                 five,
                 completed_at=timestamp,
+                material_number="M-005",
                 original_image_path=str(Path(directory) / "five.jpg"),
                 record_id="FIVE-001",
             )
@@ -94,6 +96,7 @@ class InspectionExcelRecorderTest(unittest.TestCase):
 
             self.assertEqual(sheet.cell(2, 1).value, "SINGLE-001")
             self.assertEqual(sheet.cell(2, 3).value, "单圆物料")
+            self.assertEqual(sheet.cell(2, 4).value, "M-001")
             self.assertEqual(sheet.cell(2, 7).value, "不合格")
             self.assertEqual(sheet.cell(2, 8).value, 1)
             self.assertEqual(sheet.cell(2, 9).value, 2)
@@ -105,6 +108,7 @@ class InspectionExcelRecorderTest(unittest.TestCase):
             self.assertEqual(sheet.cell(2, 19).value, 5.0)
 
             self.assertEqual(sheet.cell(3, 3).value, "五圆物料")
+            self.assertEqual(sheet.cell(3, 4).value, "M-005")
             self.assertEqual(sheet.cell(3, 6).value, 4)
             self.assertEqual(sheet.cell(3, 7).value, "待确认")
             self.assertEqual(

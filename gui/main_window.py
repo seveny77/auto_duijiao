@@ -130,6 +130,7 @@ class MainWindow(QMainWindow):
         # 和真实自动对焦最终成功这两个条件同时满足。
         self._inspection_record_candidates = {}
         self._active_focus_inspection_task_id = ""
+        self._active_focus_material_number = ""
         # 连续精扫的最佳图可能先于轴回位完成到达 GUI。
         self._continuous_best_frame_presented = False
         self.motion_service = MotionService(
@@ -303,7 +304,7 @@ class MainWindow(QMainWindow):
             lambda _checked=False: self.motion_service.stop_motion()
         )
         self.param_panel.start_btn.clicked.connect(
-            lambda _checked=False: self._start_focus_task()
+            lambda _checked=False: self._start_focus_with_material_number()
         )
         self.image_widget.live_btn.clicked.connect(self._on_toggle_live_view)
         self.param_panel.stop_btn.clicked.connect(self.controller.request_cancel) #停止
@@ -355,17 +356,39 @@ class MainWindow(QMainWindow):
     def _on_start_focus_from_inspection(self):
         """检测页的快捷按钮：复用对焦过程页既有的启动与校验逻辑。"""
 
-        self._start_focus_task()
+        self._start_focus_with_material_number()
+
+    def _start_focus_with_material_number(self):
+        """校验并锁定物料编号后，启动一次正式自动对焦。"""
+
+        try:
+            material_number = self.inspection_panel.material_number()
+        except ValueError as error:
+            message = str(error)
+            self.status_message.emit(message)
+            self._log(f"[检测记录] {message}")
+            QMessageBox.warning(self, "物料编号", message)
+            return
+
+        # 在提交后台任务前保存快照，避免执行期间修改输入框而串号。
+        self._active_focus_material_number = material_number
+        if not self._start_focus_task():
+            self._active_focus_material_number = ""
+            return
+        self.inspection_panel.set_material_number_locked(True)
+        self._log(f"[检测记录] 本次自动对焦物料编号: {material_number}")
 
     def _start_focus_task(self):
         """从任一页面启动对焦，并同步管理检测页快捷按钮状态。"""
 
         if self.focus_task_service.is_running:
             self.status_message.emit("对焦任务正在运行，请勿重复启动")
-            return
+            return False
 
         if self.focus_run_service.start():
             self.inspection_panel.start_focus_btn.setEnabled(False)
+            return True
+        return False
 
     def _on_inspection_config_save(self, config: InspectionConfig):
         """校验并原子保存检测配置；失败时保留上一份有效配置。"""
@@ -480,6 +503,8 @@ class MainWindow(QMainWindow):
             self._submit_final_image_for_inspection(result)
         self._continuous_best_frame_presented = False
         self.inspection_panel.start_focus_btn.setEnabled(True)
+        self.inspection_panel.set_material_number_locked(False)
+        self._active_focus_material_number = ""
         if self.motion_service.backend is not None:
             self.motion_service.refresh_state()
 
@@ -521,6 +546,14 @@ class MainWindow(QMainWindow):
         if image is None:
             return
 
+        # 使用检测页当前表格中正在编辑的规则，避免仍使用旧配置覆盖输入。
+        try:
+            current_config = self.inspection_panel.build_inspection_config()
+            if not current_config.validate_evaluation():
+                self.inspection_config = current_config
+        except (AttributeError, TypeError, ValueError):
+            pass
+
         try:
             task_id = self.inspection_service.submit_image(
                 image,
@@ -545,6 +578,7 @@ class MainWindow(QMainWindow):
                     "focus_succeeded": not wait_for_focus_completion,
                     "result": None,
                     "config": None,
+                    "material_number": self._active_focus_material_number,
                     "original_image_path": str(original_image_path or ""),
                 }
                 if wait_for_focus_completion:
@@ -584,6 +618,7 @@ class MainWindow(QMainWindow):
             task_id,
             candidate["result"],
             candidate["config"],
+            material_number=candidate["material_number"],
             original_image_path=candidate["original_image_path"],
         )
         if accepted:
@@ -871,6 +906,8 @@ class MainWindow(QMainWindow):
         self.result_presenter.handle_error(error_text)
         self._continuous_best_frame_presented = False
         self.inspection_panel.start_focus_btn.setEnabled(True)
+        self.inspection_panel.set_material_number_locked(False)
+        self._active_focus_material_number = ""
         if self.motion_service.backend is not None:
             self.motion_service.refresh_state()
 

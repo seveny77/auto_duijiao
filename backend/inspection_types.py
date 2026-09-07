@@ -40,7 +40,11 @@ class CircleCandidate:
 
 @dataclass
 class InspectionRegionRule:
-    """一个圆环区域内、一个缺陷类别对应的卡控规则。"""
+    """一个圆环区域的卡控规则。
+
+    class_id=-1 表示区域统一规则：该区域内所有缺陷类别合并计数；
+    非负 class_id 保留用于读取旧版按类别规则。
+    """
 
     region_id: str = ""
     region_name: str = ""
@@ -55,7 +59,7 @@ class InspectionRegionRule:
 
 @dataclass
 class RegionInspectionResult:
-    """一个圆环区域、一个缺陷类别的统计与判定结果。"""
+    """一个圆环区域的统计与判定结果；class_id=-1 表示全部缺陷。"""
 
     region_id: str = ""
     region_name: str = ""

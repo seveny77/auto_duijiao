@@ -35,6 +35,7 @@ class InspectionRecordService(QObject):
         result,
         config,
         *,
+        material_number: str = "",
         original_image_path=None,
     ) -> bool:
         """把结果放入记录队列；关闭或配置禁用时返回 False。"""
@@ -58,6 +59,7 @@ class InspectionRecordService(QObject):
                 _append_record,
                 root,
                 result_snapshot,
+                str(material_number or "").strip(),
                 str(original_image_path or ""),
                 datetime.now(),
             )
@@ -95,11 +97,13 @@ class InspectionRecordService(QObject):
 def _append_record(
     root: str,
     result,
+    material_number: str,
     original_image_path: str,
     completed_at: datetime,
 ) -> str:
     return InspectionExcelRecorder(root).append(
         result,
         completed_at=completed_at,
+        material_number=material_number,
         original_image_path=original_image_path,
     )

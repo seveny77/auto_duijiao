@@ -305,16 +305,15 @@ class InspectionPanel(QWidget):
         layout = QVBoxLayout(page)
 
         hint = QLabel(
-            "规则按“圆环区域 × 缺陷类别”配置；点击上方端面行"
-            "查看该端面的统计结果。"
+            "规则按圆环区域配置；区域内所有缺陷类别统一计数和判定。"
+            "点击上方端面行可查看该端面的统计结果。"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        self.rule_table = QTableWidget(4, 7)
+        self.rule_table = QTableWidget(2, 6)
         self.rule_table.setHorizontalHeaderLabels([
             "区域",
-            "缺陷类别",
             "最低置信度",
             "最小面积 um²",
             "数量上限",
@@ -322,16 +321,14 @@ class InspectionPanel(QWidget):
             "结论",
         ])
         preview_rows = [
-            ("中心区 0–R1", "异物", "0.25", "0.010", "0"),
-            ("中心区 0–R1", "脏污", "0.25", "0.050", "0"),
-            ("外环区 R1–R2", "异物", "0.25", "0.010", "0"),
-            ("外环区 R1–R2", "脏污", "0.25", "0.050", "0"),
+            ("中心区 0–R1", "0.25", "0.010", "0"),
+            ("外环区 R1–R2", "0.25", "0.050", "0"),
         ]
         for row, values in enumerate(preview_rows):
             for column, text in enumerate(values):
                 self.rule_table.setItem(row, column, QTableWidgetItem(text))
-            self.rule_table.setItem(row, 5, QTableWidgetItem("--"))
-            self.rule_table.setItem(row, 6, QTableWidgetItem("待检测"))
+            self.rule_table.setItem(row, 4, QTableWidgetItem("--"))
+            self.rule_table.setItem(row, 5, QTableWidgetItem("待检测"))
         self.rule_table.verticalHeader().setVisible(False)
         self.rule_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch
@@ -352,6 +349,7 @@ class InspectionPanel(QWidget):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setSpacing(8)
+        layout.addWidget(self._build_material_group())
         layout.addWidget(self._build_model_group())
         layout.addWidget(self._build_circle_group())
         layout.addWidget(self._build_region_group())
@@ -365,6 +363,38 @@ class InspectionPanel(QWidget):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(content)
         return scroll
+
+    def _build_material_group(self) -> QGroupBox:
+        """构建本次正式自动对焦检测的物料编号输入。"""
+
+        group = QGroupBox("0. 本次检测物料")
+        layout = QFormLayout(group)
+        self.material_number_edit = QLineEdit()
+        self.material_number_edit.setMaxLength(64)
+        self.material_number_edit.setPlaceholderText(
+            "开始自动对焦前请输入物料编号"
+        )
+        self.material_number_edit.setToolTip(
+            "该编号会在点击开始自动对焦时锁定，并写入本次 Excel 检测记录。"
+        )
+        layout.addRow("物料编号：", self.material_number_edit)
+        return group
+
+    def material_number(self) -> str:
+        """返回校验后的本次物料编号。"""
+
+        value = self.material_number_edit.text().strip()
+        if not value:
+            raise ValueError("请输入物料编号")
+        invalid = set('\\/:*?"<>|')
+        if any(character in invalid for character in value):
+            raise ValueError("物料编号不能包含 \\ / : * ? \" < > |")
+        return value
+
+    def set_material_number_locked(self, locked: bool):
+        """对焦任务运行期间冻结输入，避免当前任务记录串号。"""
+
+        self.material_number_edit.setReadOnly(bool(locked))
 
     def _build_model_group(self) -> QGroupBox:
         group = QGroupBox("1. 检测模型")
@@ -534,19 +564,18 @@ class InspectionPanel(QWidget):
         rule_values = self._current_rule_values()
         rules = []
         for region_id, region_name, inner_radius, outer_radius in regions:
-            for class_id, class_name in sorted(self._model_class_names.items()):
-                values = rule_values.get((region_id, class_id), (0.25, 0.0, 0))
-                rules.append(InspectionRegionRule(
-                    region_id=region_id,
-                    region_name=region_name,
-                    inner_radius_mm=inner_radius,
-                    outer_radius_mm=outer_radius,
-                    class_id=class_id,
-                    class_name=class_name,
-                    min_confidence=values[0],
-                    min_instance_area_mm2=values[1],
-                    max_instance_count=values[2],
-                ))
+            values = rule_values.get(region_id, (0.25, 0.0, 0))
+            rules.append(InspectionRegionRule(
+                region_id=region_id,
+                region_name=region_name,
+                inner_radius_mm=inner_radius,
+                outer_radius_mm=outer_radius,
+                class_id=-1,
+                class_name="全部缺陷",
+                min_confidence=values[0],
+                min_instance_area_mm2=values[1],
+                max_instance_count=values[2],
+            ))
         config.region_rules = rules
         return config
 
@@ -700,26 +729,24 @@ class InspectionPanel(QWidget):
         return regions
 
     def _current_rule_values(self):
-        """读取规则表中的三个可编辑阈值。"""
+        """读取按区域配置的三个可编辑阈值。"""
 
         values = {}
         for row in range(self.rule_table.rowCount()):
             region_item = self.rule_table.item(row, 0)
-            class_item = self.rule_table.item(row, 1)
             region_id = region_item.data(Qt.UserRole) if region_item else None
-            class_id = class_item.data(Qt.UserRole) if class_item else None
-            if region_id is None or class_id is None:
+            if region_id is None:
                 continue
             try:
-                min_confidence = float(self.rule_table.item(row, 2).text())
-                min_area = float(self.rule_table.item(row, 3).text())
-                max_count = int(self.rule_table.item(row, 4).text())
+                min_confidence = float(self.rule_table.item(row, 1).text())
+                min_area = float(self.rule_table.item(row, 2).text())
+                max_count = int(self.rule_table.item(row, 3).text())
             except (AttributeError, TypeError, ValueError):
                 raise ValueError(
                     f"规则表第 {row + 1} 行的阈值必须是有效数字，"
                     "数量上限必须是整数"
                 ) from None
-            values[(str(region_id), int(class_id))] = (
+            values[str(region_id)] = (
                 min_confidence,
                 min_area,
                 max_count,
@@ -727,7 +754,7 @@ class InspectionPanel(QWidget):
         return values
 
     def _rebuild_rule_rows(self, preferred_rules=None):
-        """按当前圆环和模型类别重建“区域 × 类别”规则表。"""
+        """按当前圆环重建“区域级统一缺陷计数”规则表。"""
 
         try:
             current_values = self._current_rule_values()
@@ -738,30 +765,26 @@ class InspectionPanel(QWidget):
 
         if preferred_rules is not None:
             for rule in preferred_rules:
-                current_values[(rule.region_id, int(rule.class_id))] = (
+                current_values.setdefault(str(rule.region_id), (
                     float(rule.min_confidence),
                     float(rule.min_instance_area_mm2),
                     int(rule.max_instance_count),
-                )
+                ))
 
         rules = []
         for region_id, region_name, inner_radius, outer_radius in regions:
-            for class_id, class_name in sorted(self._model_class_names.items()):
-                thresholds = current_values.get(
-                    (region_id, class_id),
-                    (0.25, 0.0, 0),
-                )
-                rules.append(InspectionRegionRule(
-                    region_id=region_id,
-                    region_name=region_name,
-                    inner_radius_mm=inner_radius,
-                    outer_radius_mm=outer_radius,
-                    class_id=class_id,
-                    class_name=class_name,
-                    min_confidence=thresholds[0],
-                    min_instance_area_mm2=thresholds[1],
-                    max_instance_count=thresholds[2],
-                ))
+            thresholds = current_values.get(region_id, (0.25, 0.0, 0))
+            rules.append(InspectionRegionRule(
+                region_id=region_id,
+                region_name=region_name,
+                inner_radius_mm=inner_radius,
+                outer_radius_mm=outer_radius,
+                class_id=-1,
+                class_name="全部缺陷",
+                min_confidence=thresholds[0],
+                min_instance_area_mm2=thresholds[1],
+                max_instance_count=thresholds[2],
+            ))
         self._populate_rule_table(rules)
 
     def _populate_rule_table(self, rules, results=None):
@@ -773,31 +796,36 @@ class InspectionPanel(QWidget):
         try:
             self.rule_table.setRowCount(len(rules))
             for row, rule in enumerate(rules):
-                current = results.get((rule.region_id, rule.class_id))
+                current = results.get((rule.region_id, -1))
+                if current is None:
+                    # 兼容旧检测结果：同一区域的类别统计合并显示。
+                    matching = [
+                        item for key, item in results.items()
+                        if key[0] == rule.region_id
+                    ]
+                    if matching:
+                        current = _MergedRegionResult(matching)
                 region_text = (
                     f"{rule.region_name} "
                     f"{rule.inner_radius_mm:g}–{rule.outer_radius_mm:g}mm"
                 )
                 region_item = _readonly_item(region_text)
                 region_item.setData(Qt.UserRole, str(rule.region_id))
-                class_item = _readonly_item(str(rule.class_name))
-                class_item.setData(Qt.UserRole, int(rule.class_id))
                 self.rule_table.setItem(row, 0, region_item)
-                self.rule_table.setItem(row, 1, class_item)
                 self.rule_table.setItem(
-                    row, 2, QTableWidgetItem(f"{rule.min_confidence:g}")
+                    row, 1, QTableWidgetItem(f"{rule.min_confidence:g}")
                 )
                 self.rule_table.setItem(
-                    row, 3, QTableWidgetItem(
+                    row, 2, QTableWidgetItem(
                         f"{rule.min_instance_area_mm2:g}"
                     )
                 )
                 self.rule_table.setItem(
-                    row, 4, QTableWidgetItem(str(rule.max_instance_count))
+                    row, 3, QTableWidgetItem(str(rule.max_instance_count))
                 )
                 self.rule_table.setItem(
                     row,
-                    5,
+                    4,
                     _readonly_item(
                         str(current.valid_instance_count)
                         if current is not None else "--"
@@ -808,7 +836,7 @@ class InspectionPanel(QWidget):
                     else "不合格" if current is not None
                     else "待检测"
                 )
-                self.rule_table.setItem(row, 6, _readonly_item(verdict))
+                self.rule_table.setItem(row, 5, _readonly_item(verdict))
         finally:
             self._updating_config_ui = previous_updating
 
@@ -1017,7 +1045,13 @@ class InspectionPanel(QWidget):
         self.reset_view_btn.setEnabled(True)
         self._update_image_result_summary(task_id, result)
         self._populate_circle_result_table(result)
-        self._update_rule_results(None, config)
+        # 单圆任务没有端面选择歧义，直接把该端面的区域统计回填规则表。
+        # 多圆任务仍保持“未选择端面”状态，等待用户显式选择查看详情。
+        single_circle_result = (
+            result.circle_results[0]
+            if len(result.circle_results) == 1 else None
+        )
+        self._update_rule_results(single_circle_result, config)
         self._update_image_circle_controls(result)
         self._refresh_result_image(reset_view=True)
 
@@ -1039,7 +1073,11 @@ class InspectionPanel(QWidget):
         self._inspection_config = config
         self._update_image_result_summary(task_id, result)
         self._populate_circle_result_table(result)
-        self._update_rule_results(None, config)
+        single_circle_result = (
+            result.circle_results[0]
+            if len(result.circle_results) == 1 else None
+        )
+        self._update_rule_results(single_circle_result, config)
         self._update_image_circle_controls(result)
         self._refresh_result_image(reset_view=False)
 
@@ -1718,6 +1756,17 @@ def _readonly_item(text: str) -> QTableWidgetItem:
     item = QTableWidgetItem(str(text))
     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
     return item
+
+
+class _MergedRegionResult:
+    """把旧版按类别返回的区域结果合并成一个区域总结果。"""
+
+    def __init__(self, items):
+        self.valid_instance_count = sum(
+            int(getattr(item, "valid_instance_count", 0))
+            for item in items
+        )
+        self.passed = all(bool(getattr(item, "passed", True)) for item in items)
 
 
 def _selected_circle(result):

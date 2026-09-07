@@ -78,6 +78,18 @@ class InspectionRuleEngine:
             (rule.region_id, rule.class_id): rule
             for rule in region_rules
         }
+        # class_id=-1 表示“区域统一规则”：不区分模型类别，按区域内
+        # 所有有效缺陷的总数判定；非负类别 ID 继续兼容旧配置。
+        unified_by_region = {
+            rule.region_id: rule
+            for rule in region_rules
+            if int(rule.class_id) < 0
+        }
+        active_rules = list(unified_by_region.values())
+        active_rules.extend(
+            rule for rule in region_rules
+            if rule.region_id not in unified_by_region
+        )
         result_by_pair = {
             (rule.region_id, rule.class_id): RegionInspectionResult(
                 region_id=rule.region_id,
@@ -107,7 +119,11 @@ class InspectionRuleEngine:
                 continue
 
             region_id, region_name, _inner_radius, _outer_radius = region
-            rule = rule_by_pair.get((region_id, instance.class_id))
+            rule = unified_by_region.get(region_id)
+            result_key = (region_id, -1)
+            if rule is None:
+                rule = rule_by_pair.get((region_id, instance.class_id))
+                result_key = (region_id, instance.class_id)
             if rule is None:
                 missing_rule = True
                 class_label = instance.class_name or str(instance.class_id)
@@ -129,16 +145,16 @@ class InspectionRuleEngine:
             if instance_area_mm2 < rule.min_instance_area_mm2:
                 continue
 
-            region_result = result_by_pair[(region_id, instance.class_id)]
+            region_result = result_by_pair[result_key]
             region_result.valid_instance_count += 1
             region_result.total_area_mm2 += instance_area_mm2
 
-        for rule in region_rules:
+        for rule in active_rules:
             region_result = result_by_pair[(rule.region_id, rule.class_id)]
-            if region_result.valid_instance_count >= rule.max_instance_count:
+            if region_result.valid_instance_count > rule.max_instance_count:
                 region_result.passed = False
                 reason = (
-                    f"{rule.region_name}/{rule.class_name}有效缺陷数量"
+                    f"{rule.region_name}有效缺陷数量"
                     f" {region_result.valid_instance_count} 超过上限"
                     f" {rule.max_instance_count}"
                 )

@@ -276,9 +276,14 @@ def _validate_region_rules(rules: list[InspectionRegionRule]) -> list[str]:
             errors.append(f"{label} 内半径不能小于 0")
         if rule.outer_radius_mm <= rule.inner_radius_mm:
             errors.append(f"{label} 外半径必须大于内半径")
-        if rule.class_id < 0:
-            errors.append(f"{label} class_id 不能小于 0")
-        if not rule.class_name.strip():
+        if rule.class_id < -1:
+            errors.append(f"{label} class_id 不能小于 -1")
+        if rule.class_id == -1:
+            if rule.class_name.strip() not in ("", "全部缺陷"):
+                errors.append(
+                    f"{label} 区域统一规则的 class_name 必须为空或为全部缺陷"
+                )
+        elif not rule.class_name.strip():
             errors.append(f"{label} class_name 不能为空")
         if not 0 <= rule.min_confidence <= 1:
             errors.append(f"{label} 最低置信度必须在 0～1 之间")
