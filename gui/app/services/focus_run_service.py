@@ -82,7 +82,7 @@ class FocusRunService:
         if cfg.mode == "real":
             motion = cfg.motion_backend
             if motion is None:
-                errors.append("请先连接M60 + E4O4运动控制器")
+                errors.append("请先连接M60运动控制器")
             else:
                 try:
                     state = self._motion_state_fn()

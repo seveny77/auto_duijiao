@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""M60与E4O4组合而成的正式自动对焦运动后端。"""
+"""M60 单轴运动后端，服务连续采集自动对焦。"""
 
 import logging
 import math
@@ -11,7 +11,6 @@ import perf
 from motion.base import ContinuousScanResult, MotionBackend
 from motion.state import MotionState
 from motion.lct.config import LctMotionConfig
-from motion.lct.e4o4_api import E4O4Api
 from motion.lct.errors import LctSafetyError, LctStateError
 from motion.lct.m60_api import M60Api
 
@@ -20,12 +19,11 @@ logger = logging.getLogger(__name__)
 
 
 class LctMotionBackend(MotionBackend):
-    """用M60完成运动、用E4O4按位置输出相机触发。"""
+    """使用 M60 完成回零、定位和连续扫描运动。"""
 
     def __init__(self, config: LctMotionConfig):
         self._config = config
         self._m60 = M60Api(config.m60_dll_path)
-        self._e4o4 = E4O4Api(config.e4o4_dll_path)
         self._connected = False
         self._lock = threading.RLock()
         self._stroke_counts = None
@@ -54,7 +52,7 @@ class LctMotionBackend(MotionBackend):
             logger.info("新任务运动状态准备完成：已清除历史取消请求")
 
     def connect(self) -> None:
-        """连接两套总线并完成不产生运动的静态初始化。"""
+        """连接 M60 并完成不产生运动的静态初始化。"""
 
         with self._lock:
             if self._connected:
@@ -77,33 +75,6 @@ class LctMotionBackend(MotionBackend):
                 perf.record(
                     "lct.connect.m60_init_ms",
                     (time.perf_counter() - m60_init_t0) * 1000,
-                )
-
-                e4o4_init_t0 = time.perf_counter()
-                self._e4o4.load()
-                self._e4o4.connect(
-                    option=0,
-                    net_card_name=self._config.e4o4_net_card,
-                )
-                time.sleep(0.5)
-                self._e4o4.configure_encoder(
-                    slave_no=self._config.e4o4_slave_no,
-                    encoder_no=self._config.encoder_no,
-                    multiplier=self._config.encoder_multiplier,
-                    direction=self._config.encoder_direction,
-                    enabled=True,
-                )
-                self._e4o4.configure_trigger_idle(
-                    slave_no=self._config.e4o4_slave_no,
-                    trigger_no=self._config.trigger_out_no,
-                    pulse_width_10ns=(
-                        self._config.trigger_pulse_width_10ns
-                    ),
-                    polarity=self._config.trigger_polarity,
-                )
-                perf.record(
-                    "lct.connect.e4o4_init_ms",
-                    (time.perf_counter() - e4o4_init_t0) * 1000,
                 )
 
                 status_check_t0 = time.perf_counter()
@@ -132,7 +103,7 @@ class LctMotionBackend(MotionBackend):
                 raise
 
     def disconnect(self) -> None:
-        """停止运动、关闭比较器、去使能并释放两套总线。"""
+        """停止运动、去使能并释放 M60。"""
 
         with self._lock:
             self._cleanup_partial_connection()
@@ -260,7 +231,7 @@ class LctMotionBackend(MotionBackend):
         timeout_s: float,
         cancel_event=None,
     ) -> MotionState:
-        """在不配置E4O4比较器的情况下移动到指定位置并保持。"""
+        """在不配置硬件触发的情况下移动到指定位置并保持。"""
 
         with self._lock:
             self._require_connected()
@@ -454,6 +425,8 @@ class LctMotionBackend(MotionBackend):
         velocity_um_s: float | None = None,
     ) -> int:
         """从start正向飞拍，越过end后再运动配置的末端余量。"""
+
+        raise LctStateError("旧 E4O4 线性硬触发飞拍已从当前版本移除")
 
         with self._lock:
             self._require_connected()
@@ -756,7 +729,7 @@ class LctMotionBackend(MotionBackend):
         cancel_event=None,
         velocity_um_s: float | None = None,
     ) -> ContinuousScanResult:
-        """从起点连续移动到终点，不配置 E4O4 比较器。"""
+        """从起点连续移动到终点，不配置硬件触发。"""
 
         with self._lock:
             self._require_connected()
@@ -875,6 +848,8 @@ class LctMotionBackend(MotionBackend):
         若轴已停在目标上方且余量足够（≥准备距离一半，足以加速到
         扫描速度匀速越点），跳过准备定位直接从当前位置起扫。
         """
+
+        raise LctStateError("旧 E4O4 单点硬触发飞拍已从当前版本移除")
 
         with self._lock:
             self._require_connected()
@@ -1401,12 +1376,6 @@ class LctMotionBackend(MotionBackend):
         return "已连接"
 
     def _cleanup_partial_connection(self) -> None:
-        if self._e4o4.is_connected:
-            # 断开连接走完整解绑（增量模式也不保留绑定）。
-            self._safe_disarm_line(full=True)
-            self._safe_disarm_pre(full=True)
-            self._e4o4.close()
-
         if self._m60.ecat_connected:
             try:
                 status = self._m60.get_axis_status(self._config.axis_no)

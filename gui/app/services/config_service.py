@@ -13,17 +13,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MOTION_CONFIG = {
     "m60_dll_path": r"C:\Program Files (x86)\LCT\Pcie-M60\Sdk\lib\c++\x64\ecat_motion.dll",
-    "e4o4_dll_path": r"C:\Program Files (x86)\LCT\MINI-BUS Setup\SDK\x64\MiniEcatLib.dll",
     "eni_path": r"C:\Program Files (x86)\LCT\Pcie-M60\ENI\eni_expertmode_Card0.xml",
     "axis_param_path": r"C:\Program Files (x86)\LCT\Pcie-M60\Motion_Assistant\AxisParam\ParamCard0.ini",
-    "card_no": 0, "axis_no": 1, "e4o4_slave_no": 1, "encoder_no": 0,
-    "trigger_out_no": 0, "line_compare_no": 0, "precompare_no": 0,
-    "counts_per_um": 100, "encoder_multiplier": 4, "encoder_direction": 1,
-    "trigger_pulse_width_10ns": 2000, "trigger_polarity": 0,
+    "card_no": 0, "axis_no": 1, "counts_per_um": 100,
     "positioning_velocity_um_s": 100.0, "scan_velocity_um_s": 100.0,
-    "calibrate_scan_velocity_um_s": 100.0, "coarse_scan_velocity_um_s": 1000.0,
-    "fine_scan_velocity_um_s": 50.0, "line_scan_overrun_um": 20.0,
-    "single_capture_approach_um": 50, "single_capture_exit_um": 50,
     "position_tolerance_um": 1.0, "home_method": 33, "home_offset_counts": 0,
     "home_speed1_counts_s": 10000, "home_speed2_counts_s": 2000,
     "home_acceleration_counts_s2": 100000, "home_probe_function": 0,
@@ -91,7 +84,12 @@ class ConfigService:
     def build_motion_config(self):
         from motion.lct.config import LctMotionConfig
         values = dict(DEFAULT_MOTION_CONFIG)
-        values.update(self._motion_values())
+        # 兼容既有 gui/config.json：其中旧 E4O4 字段会被有意忽略。
+        values.update({
+            key: value
+            for key, value in self._motion_values().items()
+            if key in values
+        })
         return LctMotionConfig(**values)
 
     def _motion_values(self):
@@ -123,7 +121,11 @@ class ConfigService:
     def save(self):
         try:
             config = self.collect()
-            config["motion"] = self._motion_values()
+            config["motion"] = {
+                key: value
+                for key, value in self._motion_values().items()
+                if key in DEFAULT_MOTION_CONFIG
+            }
             with open(self._path, "w", encoding="utf-8") as file:
                 json.dump(config, file, ensure_ascii=False, indent=2)
         except Exception:

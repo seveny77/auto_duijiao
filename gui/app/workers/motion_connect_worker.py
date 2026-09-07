@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class MotionConnectWorker(QObject):
-    """在后台执行一次M60+E4O4连接和行程读取。"""
+    """在后台执行一次 M60 连接和行程读取。"""
 
     connected = pyqtSignal(object)
     failed = pyqtSignal(str)

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""M60+E4O4连接、复位、使能和回零生命周期服务。"""
+"""M60连接、复位、使能和回零生命周期服务。"""
 
 import logging
 import threading
@@ -108,7 +108,7 @@ class MotionService(QObject):
         self._set_busy_ui(True)
         self._connect_btn.setText("连接中...")
         self._status_fn("正在连接运动控制器")
-        logger.info("正在连接M60和E4O4...")
+        logger.info("正在连接M60运动控制器...")
 
         worker = MotionConnectWorker(config, self._shutdown_requested)
         worker.connected.connect(self._on_connected, Qt.QueuedConnection)
