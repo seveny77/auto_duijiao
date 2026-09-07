@@ -19,6 +19,7 @@ from gui.app.services.ct_logger import CtLogger
 from gui.app.services.result_presenter import ResultPresenter
 from gui.app.services.motion_service import MotionService
 from gui.app.services.inspection_service import InspectionService
+from gui.app.services.inspection_record_service import InspectionRecordService
 from gui.app.services.inspection_image_loader import (
     load_inspection_image,
 )
@@ -112,6 +113,10 @@ class MainWindow(QMainWindow):
             self.inspection_config = InspectionConfig()
 
         self.inspection_service = InspectionService(parent=self)
+        self.inspection_record_service = InspectionRecordService(
+            PROJECT_ROOT,
+            parent=self,
+        )
         self.inspection_recheck_engine = InspectionRuleEngine()
         self.inspection_panel.set_inspection_config(self.inspection_config)
         self._inspection_current_task_id = ""
@@ -121,6 +126,10 @@ class MainWindow(QMainWindow):
         self._inspection_circle_request_config = None
         self._inspection_close_requested = False
         self._inspection_shutdown_connected = False
+        # 最佳帧早于轴回位结果发布。Excel 记录需要等待完整多端面检测
+        # 和真实自动对焦最终成功这两个条件同时满足。
+        self._inspection_record_candidates = {}
+        self._active_focus_inspection_task_id = ""
         # 连续精扫的最佳图可能先于轴回位完成到达 GUI。
         self._continuous_best_frame_presented = False
         self.motion_service = MotionService(
@@ -249,6 +258,16 @@ class MainWindow(QMainWindow):
         )
         self.inspection_service.inspection_image_save_failed.connect(
             lambda task_id, message: self._log(f"[检测] {task_id} 结果图保存失败: {message}")
+        )
+        self.inspection_record_service.record_saved.connect(
+            lambda task_id, path: self._log(
+                f"[检测记录] {task_id} 已写入: {path}"
+            )
+        )
+        self.inspection_record_service.record_failed.connect(
+            lambda task_id, message: self._log(
+                f"[检测记录] {task_id} 写入失败: {message}"
+            )
         )
         self.inspection_service.image_inspection_visual_ready.connect(
             self._on_image_inspection_visual_ready
@@ -455,6 +474,7 @@ class MainWindow(QMainWindow):
         )
         if is_early_continuous_result:
             self.result_presenter.complete_continuous_return(result)
+            self._finish_focus_record_candidate(result)
         else:
             self.result_presenter.handle_finished(result)
             self._submit_final_image_for_inspection(result)
@@ -471,6 +491,7 @@ class MainWindow(QMainWindow):
         self._submit_image_for_inspection(
             getattr(event, "image", None),
             original_image_path=getattr(event, "final_image_path", None),
+            wait_for_focus_completion=True,
         )
 
     def _submit_final_image_for_inspection(self, result):
@@ -485,9 +506,16 @@ class MainWindow(QMainWindow):
         self._submit_image_for_inspection(
             final_image,
             original_image_path=getattr(result, "final_image_path", None),
+            wait_for_focus_completion=False,
         )
 
-    def _submit_image_for_inspection(self, image, *, original_image_path=None):
+    def _submit_image_for_inspection(
+        self,
+        image,
+        *,
+        original_image_path=None,
+        wait_for_focus_completion=False,
+    ):
         """将已确定的原始最佳图提交给独立检测服务。"""
 
         if image is None:
@@ -505,6 +533,61 @@ class MainWindow(QMainWindow):
 
         if task_id:
             self._log(f"[检测] 已提交最终图，任务号: {task_id}")
+            if (
+                self.param_panel.mode_combo.currentText() == "真实"
+                and bool(getattr(
+                    self.inspection_config,
+                    "excel_record_enabled",
+                    True,
+                ))
+            ):
+                self._inspection_record_candidates[task_id] = {
+                    "focus_succeeded": not wait_for_focus_completion,
+                    "result": None,
+                    "config": None,
+                    "original_image_path": str(original_image_path or ""),
+                }
+                if wait_for_focus_completion:
+                    self._active_focus_inspection_task_id = task_id
+                self._try_submit_inspection_record(task_id)
+
+    def _finish_focus_record_candidate(self, focus_result):
+        """根据轴回位后的最终 rc 决定提前检测能否写入生产记录。"""
+
+        task_id = self._active_focus_inspection_task_id
+        self._active_focus_inspection_task_id = ""
+        if not task_id:
+            return
+        candidate = self._inspection_record_candidates.get(task_id)
+        if candidate is None:
+            return
+        succeeded = (
+            getattr(focus_result, "action", "") == "search"
+            and getattr(focus_result, "rc", 1) == 0
+        )
+        if not succeeded:
+            self._inspection_record_candidates.pop(task_id, None)
+            return
+        candidate["focus_succeeded"] = True
+        self._try_submit_inspection_record(task_id)
+
+    def _try_submit_inspection_record(self, task_id: str):
+        """两个完成事件汇合后只把该任务加入一次 Excel 写入队列。"""
+
+        candidate = self._inspection_record_candidates.get(task_id)
+        if not candidate:
+            return
+        if not candidate["focus_succeeded"] or candidate["result"] is None:
+            return
+        candidate = self._inspection_record_candidates.pop(task_id)
+        accepted = self.inspection_record_service.submit(
+            task_id,
+            candidate["result"],
+            candidate["config"],
+            original_image_path=candidate["original_image_path"],
+        )
+        if accepted:
+            self._log(f"[检测记录] {task_id} 已加入 Excel 写入队列")
 
     def _on_inspection_finished(self, task_id: str, result):
         """接收后台检测结果，先更新判定摘要并写入日志。"""
@@ -570,6 +653,11 @@ class MainWindow(QMainWindow):
         self._inspection_current_task_id = task_id
         self._inspection_current_image = original_image
         self._inspection_image_result = result
+        record_candidate = self._inspection_record_candidates.get(task_id)
+        if record_candidate is not None:
+            record_candidate["result"] = result
+            record_candidate["config"] = _config
+            self._try_submit_inspection_record(task_id)
         try:
             self.inspection_panel.present_image_inspection_result(
                 task_id,
@@ -1011,6 +1099,9 @@ class MainWindow(QMainWindow):
         if not self.shutdown_service.try_shutdown():
             event.ignore()
             return
+
+        # 检测线程已退出，不会再产生新记录；确保最后一行原子保存完成。
+        self.inspection_record_service.shutdown()
 
         if self._qt_log_handler is not None:
             remove_qt_log_handler(self._qt_log_handler)

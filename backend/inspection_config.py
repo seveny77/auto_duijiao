@@ -36,6 +36,9 @@ class InspectionConfig:
     inference_nms_iou: float = 0.30
     mm_per_pixel: float = 0.0
     history_root: str = "inspection_history"
+    # 正式自动对焦完成后异步追加到按日保存的 Excel；离线检测不记录。
+    excel_record_enabled: bool = True
+    excel_record_root: str = "inspection_records"
     circle: CircleDetectionConfig = field(
         default_factory=CircleDetectionConfig
     )
@@ -55,6 +58,8 @@ class InspectionConfig:
 
         if not str(self.history_root).strip():
             errors.append("历史记录目录不能为空")
+        if self.excel_record_enabled and not str(self.excel_record_root).strip():
+            errors.append("Excel 检测记录目录不能为空")
 
         if self.inference_imgsz < 1:
             errors.append("分割推理尺寸 inference_imgsz 必须大于 0")
@@ -197,6 +202,12 @@ def inspection_config_from_dict(payload: dict[str, Any]) -> InspectionConfig:
             "mm_per_pixel", defaults.mm_per_pixel
         )),
         history_root=str(payload.get("history_root", defaults.history_root)),
+        excel_record_enabled=bool(payload.get(
+            "excel_record_enabled", defaults.excel_record_enabled
+        )),
+        excel_record_root=str(payload.get(
+            "excel_record_root", defaults.excel_record_root
+        )),
         circle=circle,
         region_rules=rules,
         roi_size_px=roi_size_px,
