@@ -135,7 +135,7 @@ class InspectionRuleEngine:
 
         for rule in region_rules:
             region_result = result_by_pair[(rule.region_id, rule.class_id)]
-            if region_result.valid_instance_count > rule.max_instance_count:
+            if region_result.valid_instance_count >= rule.max_instance_count:
                 region_result.passed = False
                 reason = (
                     f"{rule.region_name}/{rule.class_name}有效缺陷数量"
