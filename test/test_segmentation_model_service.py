@@ -93,7 +93,8 @@ class SegmentationModelServiceTest(unittest.TestCase):
         self.assertEqual(len(factory_calls), 1)
         self.assertEqual(len(model.calls), 1)
         self.assertEqual(model.calls[0]["imgsz"], 1280)
-        self.assertEqual(model.calls[0]["max_det"], 20)
+        self.assertEqual(model.calls[0]["max_det"], MAX_DETECTIONS_PER_IMAGE)
+        self.assertEqual(model.calls[0]["iou"], 0.30)
         self.assertEqual(service.class_names, {0: "异物", 1: "脏污"})
 
     def test_loaded_model_cannot_be_switched(self):
@@ -138,7 +139,8 @@ class SegmentationModelServiceTest(unittest.TestCase):
         self.assertEqual(instance.bbox, (10.0, 20.0, 30.0, 40.0))
         self.assertEqual(instance.pixel_area, 400)
         self.assertIsInstance(instance.polygon[0], tuple)
-        self.assertEqual(model.calls[-1]["max_det"], 20)
+        self.assertEqual(model.calls[-1]["max_det"], MAX_DETECTIONS_PER_IMAGE)
+        self.assertEqual(model.calls[-1]["iou"], 0.30)
 
     def test_predict_never_returns_more_than_twenty_instances(self):
         count = MAX_DETECTIONS_PER_IMAGE + 5
@@ -169,7 +171,8 @@ class SegmentationModelServiceTest(unittest.TestCase):
             )
 
         self.assertEqual(len(instances), MAX_DETECTIONS_PER_IMAGE)
-        self.assertEqual(model.calls[-1]["max_det"], 20)
+        self.assertEqual(model.calls[-1]["max_det"], MAX_DETECTIONS_PER_IMAGE)
+        self.assertEqual(model.calls[-1]["iou"], 0.30)
 
     def test_empty_detection_is_valid_but_boxes_without_masks_fail(self):
         with tempfile.TemporaryDirectory() as directory:

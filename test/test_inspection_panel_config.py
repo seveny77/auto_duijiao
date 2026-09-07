@@ -84,6 +84,7 @@ class InspectionPanelConfigTest(unittest.TestCase):
     def test_visible_edits_are_collected(self):
         self.panel.set_inspection_config(_valid_config())
         self.panel.mm_per_pixel_spin.setValue(0.02)
+        self.panel.inference_nms_iou_spin.setValue(0.35)
         self.panel.min_radius_spin.setValue(900)
         self.panel.rule_table.item(0, 2).setText("0.55")
         self.panel.rule_table.item(0, 4).setText("3")
@@ -91,6 +92,7 @@ class InspectionPanelConfigTest(unittest.TestCase):
         rebuilt = self.panel.build_inspection_config()
 
         self.assertAlmostEqual(rebuilt.mm_per_pixel, 0.02)
+        self.assertAlmostEqual(rebuilt.inference_nms_iou, 0.35)
         self.assertEqual(rebuilt.circle.min_radius_px, 900)
         self.assertAlmostEqual(rebuilt.region_rules[0].min_confidence, 0.55)
         self.assertEqual(rebuilt.region_rules[0].max_instance_count, 3)

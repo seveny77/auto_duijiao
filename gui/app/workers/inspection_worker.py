@@ -84,6 +84,7 @@ class InspectionWorker(QObject):
             model_path,
             imgsz=config.inference_imgsz,
             confidence_floor=config.inference_confidence_floor,
+            nms_iou=config.inference_nms_iou,
         )
         self._circle_model_service.load(
             circle_model_path,
@@ -114,10 +115,12 @@ class InspectionWorker(QObject):
             image,
             config,
         )
-        self._save_result_image(task_id, image, image_result, config, original_image_path)
         # 先发送完整多圆结果；旧信号继续服务当前单圆 GUI。
         self.image_inspection_finished.emit(task_id, image_result)
         self.inspection_finished.emit(task_id, compatibility_result)
+        # 结果先交给 GUI，截图保存继续在本检测线程中顺序执行。
+        # 这样不改变保存方式，也不会让保存阻塞本次界面的结果刷新。
+        self._save_result_image(task_id, image, image_result, config, original_image_path)
 
     def _save_result_image(self, task_id, image, image_result, config, original_image_path):
         if original_image_path:
@@ -150,9 +153,11 @@ class InspectionWorker(QObject):
         compatibility_result.timings_ms["circle_redetection_total"] = (
             compatibility_result.timings_ms.get("total", 0.0)
         )
-        self._save_result_image(task_id, image, image_result, config, original_image_path)
         self.image_circle_redetection_finished.emit(task_id, image_result)
         self.circle_redetection_finished.emit(task_id, compatibility_result)
+        # 与首次检测保持一致：先让界面更新，再同步保存检测截图。
+        # 保存期间该 Worker 仍占用，后续任务会在 Qt 队列中等待。
+        self._save_result_image(task_id, image, image_result, config, original_image_path)
 
     def _inspect_image(self, task_id: str, image, config):
         """执行一次不访问 Qt 控件的多圆 ROI 检测编排。"""
@@ -245,6 +250,7 @@ class InspectionWorker(QObject):
                         roi_image,
                         imgsz=config.inference_imgsz,
                         confidence_floor=config.inference_confidence_floor,
+                        nms_iou=config.inference_nms_iou,
                     )
                 finally:
                     inference_ms = _elapsed_ms(inference_start)

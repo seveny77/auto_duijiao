@@ -1,12 +1,12 @@
 {
   "enabled": true,
-  "model_path": "F:\\项目\\自动对焦\\code\\yoloSegRuns\\roi_seg_v4-6\\weights\\best.pt",
+  "model_path": "F:\\项目\\自动对焦\\code\\yoloSegRunsMPO\\roi_seg_v20260906-3\\weights\\best.pt",
   "inference_imgsz": 1024,
   "inference_confidence_floor": 0.1,
   "mm_per_pixel": 0.24,
   "history_root": "inspection_history",
   "circle": {
-    "model_path": "F:\\项目\\自动对焦\\code\\detect\\runs\\detect\\autofocus\\weights\\best.pt",
+    "model_path": "F:/项目/自动对焦/code/detect/runs/detect/runs/detect/circle_v20260905-3/weights/best.pt",
     "confidence_floor": 0.25,
     "expected_circle_count": 5
   },

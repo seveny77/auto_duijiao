@@ -76,11 +76,13 @@ class InspectionConfigTest(unittest.TestCase):
             region_rules=_valid_rules(),
             inference_imgsz=0,
             inference_confidence_floor=1.1,
+            inference_nms_iou=0.0,
         )
 
         errors = config.validate()
         self.assertTrue(any("inference_imgsz" in item for item in errors))
         self.assertTrue(any("置信度下限" in item for item in errors))
+        self.assertTrue(any("NMS IoU" in item for item in errors))
 
     def test_invalid_hough_values_and_circle_count_are_reported(self):
         config = InspectionConfig(
@@ -163,6 +165,7 @@ class InspectionConfigTest(unittest.TestCase):
         self.assertEqual(restored.history_root, "inspection_history")
         self.assertEqual(restored.inference_imgsz, 4096)
         self.assertEqual(restored.inference_confidence_floor, 0.01)
+        self.assertEqual(restored.inference_nms_iou, 0.30)
         self.assertEqual(restored.roi_size_px, 1024)
 
     def test_roi_size_is_independent_of_circle_radius_and_inference_size(self):

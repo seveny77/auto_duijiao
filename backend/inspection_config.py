@@ -32,6 +32,8 @@ class InspectionConfig:
     model_path: str = ""
     inference_imgsz: int = 1024
     inference_confidence_floor: float = 0.01
+    # 分割实例的检测框 NMS IoU 阈值；值越小，重叠候选去重越强。
+    inference_nms_iou: float = 0.30
     mm_per_pixel: float = 0.0
     history_root: str = "inspection_history"
     circle: CircleDetectionConfig = field(
@@ -60,6 +62,10 @@ class InspectionConfig:
             0 <= self.inference_confidence_floor <= 1
         ):
             errors.append("分割推理置信度下限必须在 0～1 之间")
+        if not math.isfinite(self.inference_nms_iou) or not (
+            0 < self.inference_nms_iou <= 1
+        ):
+            errors.append("分割推理 NMS IoU 阈值必须在 (0, 1] 之间")
 
         roi_error = _roi_size_error(self.roi_size_px)
         if roi_error:
@@ -183,6 +189,9 @@ def inspection_config_from_dict(payload: dict[str, Any]) -> InspectionConfig:
         inference_confidence_floor=float(payload.get(
             "inference_confidence_floor",
             defaults.inference_confidence_floor,
+        )),
+        inference_nms_iou=float(payload.get(
+            "inference_nms_iou", defaults.inference_nms_iou
         )),
         mm_per_pixel=float(payload.get(
             "mm_per_pixel", defaults.mm_per_pixel

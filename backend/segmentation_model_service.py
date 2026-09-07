@@ -64,6 +64,7 @@ class SegmentationModelService:
         *,
         imgsz: int = 1280,
         confidence_floor: float = 0.01,
+        nms_iou: float = 0.30,
     ):
         """加载并预热唯一模型；失败时服务仍保持未加载状态。"""
 
@@ -74,7 +75,7 @@ class SegmentationModelService:
             raise ValueError("分割模型必须是 .pt 文件")
         if not os.path.isfile(path):
             raise FileNotFoundError(f"分割模型文件不存在: {path}")
-        _validate_inference_options(imgsz, confidence_floor)
+        _validate_inference_options(imgsz, confidence_floor, nms_iou)
 
         if self._model is not None:
             if os.path.normcase(path) == os.path.normcase(self._model_path):
@@ -109,6 +110,7 @@ class SegmentationModelService:
             source=warmup_image,
             imgsz=int(imgsz),
             conf=float(confidence_floor),
+            iou=float(nms_iou),
             retina_masks=True,
             max_det=MAX_DETECTIONS_PER_IMAGE,
             verbose=False,
@@ -131,6 +133,7 @@ class SegmentationModelService:
         *,
         imgsz: int = 1280,
         confidence_floor: float = 0.01,
+        nms_iou: float = 0.30,
     ) -> list[SegmentationInstance]:
         """对单张图像或 ROI 推理并返回普通 Python 分割实例。"""
 
@@ -140,12 +143,13 @@ class SegmentationModelService:
             raise ValueError("分割推理收到无效图像")
         if getattr(image, "size", 0) == 0:
             raise ValueError("分割推理收到空图像")
-        _validate_inference_options(imgsz, confidence_floor)
+        _validate_inference_options(imgsz, confidence_floor, nms_iou)
 
         results = self._model.predict(
             source=image,
             imgsz=int(imgsz),
             conf=float(confidence_floor),
+            iou=float(nms_iou),
             retina_masks=True,
             max_det=MAX_DETECTIONS_PER_IMAGE,
             verbose=False,
@@ -166,13 +170,19 @@ class SegmentationModelService:
         self._device = None
 
 
-def _validate_inference_options(imgsz: int, confidence_floor: float):
+def _validate_inference_options(
+    imgsz: int,
+    confidence_floor: float,
+    nms_iou: float,
+):
     if int(imgsz) < 1:
         raise ValueError("分割推理尺寸 imgsz 必须大于 0")
     if not math.isfinite(float(confidence_floor)) or not (
         0 <= float(confidence_floor) <= 1
     ):
         raise ValueError("分割推理置信度下限必须在 0～1 之间")
+    if not math.isfinite(float(nms_iou)) or not (0 < float(nms_iou) <= 1):
+        raise ValueError("分割推理 NMS IoU 阈值必须在 (0, 1] 之间")
 
 
 def _normalize_class_names(names) -> dict[int, str]:

@@ -390,6 +390,19 @@ class InspectionPanel(QWidget):
         self.select_circle_model_btn = QPushButton("选择找圆模型…")
         layout.addWidget(self.select_circle_model_btn)
 
+        inference_form = QFormLayout()
+        self.inference_nms_iou_spin = QDoubleSpinBox()
+        self.inference_nms_iou_spin.setRange(0.01, 1.0)
+        self.inference_nms_iou_spin.setDecimals(2)
+        self.inference_nms_iou_spin.setSingleStep(0.05)
+        self.inference_nms_iou_spin.setValue(0.30)
+        self.inference_nms_iou_spin.setToolTip(
+            "同类候选检测框的重叠 IoU 超过此值时会被 NMS 去重；"
+            "数值越小，重叠缺陷实例去重越强。"
+        )
+        inference_form.addRow("分割 NMS IoU：", self.inference_nms_iou_spin)
+        layout.addLayout(inference_form)
+
         form = QFormLayout()
         self.model_status_label = QLabel("尚未加载")
         self.model_classes_label = QLabel("--")
@@ -440,6 +453,9 @@ class InspectionPanel(QWidget):
             self._base_inspection_config = copy.deepcopy(config)
             self.set_model_path(config.model_path)
             self.set_circle_model_path(config.circle.model_path)
+            self.inference_nms_iou_spin.setValue(
+                float(config.inference_nms_iou)
+            )
             self.mm_per_pixel_spin.setValue(float(config.mm_per_pixel))
             self.circle_confidence_spin.setValue(
                 float(config.circle.confidence_floor)
@@ -500,6 +516,9 @@ class InspectionPanel(QWidget):
         config = copy.deepcopy(self._base_inspection_config)
         config.model_path = self.selected_model_path
         config.circle.model_path = self.selected_circle_model_path
+        config.inference_nms_iou = float(
+            self.inference_nms_iou_spin.value()
+        )
         config.mm_per_pixel = float(self.mm_per_pixel_spin.value())
         config.circle.confidence_floor = float(
             self.circle_confidence_spin.value()
