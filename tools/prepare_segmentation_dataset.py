@@ -11,7 +11,7 @@ from collections import Counter
 from pathlib import Path
 
 
-DEFAULT_CLASSES = ["异物", "脏污"]
+DEFAULT_CLASSES = ["污点", "划痕"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
 

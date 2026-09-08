@@ -29,7 +29,7 @@ def default_inspection_size_rules() -> list[InspectionSizeRule]:
     """返回当前确认的 A/B/C/D 工艺默认规则。
 
     本函数每次都会构造新对象，避免不同 ``InspectionConfig`` 共享可变
-    规则列表。这里仅描述工艺数据，实际尺寸测量与判定在后续步骤接入。
+    规则列表。尺寸测量和判定由新版检测引擎直接使用。
     """
 
     def rule(
@@ -120,8 +120,8 @@ class InspectionConfig:
         default_factory=CircleDetectionConfig
     )
     region_rules: list[InspectionRegionRule] = field(default_factory=list)
-    # v2 为“区域 × 缺陷类别 × 尺寸段”规则；旧 region_rules 仍保留，
-    # 直到后续规则引擎切换完成，避免影响当前生产检测流程。
+    # v2 为正式使用的“区域 × 缺陷类别 × 尺寸段”规则。
+    # region_rules 字段只保留用于读取尚未清理的界面对象，不参与判定。
     rule_schema_version: int = 2
     size_rules: list[InspectionSizeRule] = field(
         default_factory=default_inspection_size_rules

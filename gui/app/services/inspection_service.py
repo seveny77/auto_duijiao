@@ -8,7 +8,7 @@ from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
 
 from backend.circle_detection import YoloCircleDetector
 from backend.circle_model_service import CircleModelService
-from backend.inspection_engine import InspectionRuleEngine
+from backend.size_rule_inspection_engine import SizeRuleInspectionEngine
 from backend.inspection_types import InspectionResult
 from backend.segmentation_model_service import SegmentationModelService
 from gui.app.workers.inspection_worker import InspectionWorker
@@ -79,7 +79,7 @@ class InspectionService(QObject):
             segmentation_service or SegmentationModelService(),
             circle_model_service,
             circle_detector or YoloCircleDetector(circle_model_service),
-            rule_engine or InspectionRuleEngine(),
+            rule_engine or SizeRuleInspectionEngine(),
         )
         self._worker.moveToThread(self._thread)
 

@@ -301,7 +301,8 @@ class MultiCircleInspectionTypesTest(unittest.TestCase):
         self.assertEqual(set(inspection_to_dict(result)), {
             "status", "error", "warnings", "image_width", "image_height",
             "mm_per_pixel", "circle_candidates", "selected_circle_index",
-            "circle_confirmed", "instances", "region_results",
+            "circle_confirmed", "instances", "measurements", "region_results",
+            "size_rule_results",
             "failure_reasons", "timings_ms",
         })
         self.assertIsInstance(InspectionRecord().result, InspectionResult)

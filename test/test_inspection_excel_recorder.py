@@ -12,13 +12,31 @@ from backend.inspection_excel_recorder import HEADERS, InspectionExcelRecorder
 from backend.inspection_types import (
     CircleCandidate,
     CircleInspectionResult,
+    DefectMeasurement,
     ImageInspectionResult,
     InspectionStatus,
-    RegionInspectionResult,
+    SizeRuleInspectionResult,
 )
 
 
-def _circle(status, dirty_count, foreign_count, *, found=True):
+def _circle(status, spot_count, scratch_count, *, found=True):
+    measurements = []
+    for index in range(spot_count):
+        measurements.append(DefectMeasurement(
+            instance_index=index,
+            class_id=0,
+            class_name="污点",
+            area_um2=1.0,
+            source="polygon",
+        ))
+    for index in range(scratch_count):
+        measurements.append(DefectMeasurement(
+            instance_index=spot_count + index,
+            class_id=1,
+            class_name="划痕",
+            area_um2=2.0,
+            source="polygon",
+        ))
     return CircleInspectionResult(
         circle_id="circle-001",
         circle_candidate=(
@@ -27,19 +45,18 @@ def _circle(status, dirty_count, foreign_count, *, found=True):
         completed=found,
         circle_confirmed=found,
         status=status,
-        region_results=(
+        measurements=measurements if found else [],
+        size_rule_results=(
             [
-                RegionInspectionResult(
-                    class_id=1,
-                    class_name="脏污",
-                    valid_instance_count=dirty_count,
-                    total_area_mm2=float(dirty_count),
+                SizeRuleInspectionResult(
+                    rule_id="spot",
+                    defect_class="污点",
+                    actual_instance_count=spot_count,
                 ),
-                RegionInspectionResult(
-                    class_id=0,
-                    class_name="异物",
-                    valid_instance_count=foreign_count,
-                    total_area_mm2=float(foreign_count) * 2,
+                SizeRuleInspectionResult(
+                    rule_id="scratch",
+                    defect_class="划痕",
+                    actual_instance_count=scratch_count,
                 ),
             ]
             if found else []
@@ -55,7 +72,7 @@ class InspectionExcelRecorderTest(unittest.TestCase):
             detected_circle_count=1,
             status=InspectionStatus.FAIL,
             circle_results=[_circle(InspectionStatus.FAIL, 1, 2)],
-            failure_reasons=["circle-001: 脏污数量超过上限"],
+            failure_reasons=["circle-001: 污点尺寸段数量超过上限"],
         )
         five = ImageInspectionResult(
             expected_circle_count=5,

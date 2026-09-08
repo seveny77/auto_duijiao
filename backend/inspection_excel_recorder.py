@@ -7,7 +7,11 @@ from pathlib import Path
 import threading
 import uuid
 
-from backend.inspection_types import ImageInspectionResult, InspectionStatus
+from backend.inspection_types import (
+    DefectMeasurement,
+    ImageInspectionResult,
+    InspectionStatus,
+)
 
 
 SHEET_NAME = "检测记录"
@@ -20,16 +24,16 @@ HEADERS = (
     "预期端面数",
     "实际检出端面数",
     "总判定",
-    "端面1脏污数量",
-    "端面1异物数量",
-    "端面2脏污数量",
-    "端面2异物数量",
-    "端面3脏污数量",
-    "端面3异物数量",
-    "端面4脏污数量",
-    "端面4异物数量",
-    "端面5脏污数量",
-    "端面5异物数量",
+    "端面1污点数量",
+    "端面1划痕数量",
+    "端面2污点数量",
+    "端面2划痕数量",
+    "端面3污点数量",
+    "端面3划痕数量",
+    "端面4污点数量",
+    "端面4划痕数量",
+    "端面5污点数量",
+    "端面5划痕数量",
     "有效缺陷总数",
     "缺陷总面积（um²）",
     "合格端面数",
@@ -98,7 +102,9 @@ class InspectionExcelRecorder:
 
     def _daily_path(self, timestamp: datetime) -> Path:
         month_dir = Path(self._root) / timestamp.strftime("%Y-%m")
-        return month_dir / f"检测记录_{timestamp:%Y%m%d}.xlsx"
+        # 新规则使用“污点/划痕 + 尺寸段”结果，和旧版“脏污/异物”
+        # 的表头不同。使用 v2 文件名，保留旧表格，避免新旧格式混写。
+        return month_dir / f"检测记录_v2_{timestamp:%Y%m%d}.xlsx"
 
     @staticmethod
     def _append_atomic(output_path: Path, row: list):
@@ -146,7 +152,11 @@ def build_record_row(
     remark: str = "",
     record_id: str = "",
 ) -> list:
-    """把多端面结果展开成固定 26 列的一行。"""
+    """把多端面结果展开成固定 26 列的一行。
+
+    端面数量列来自新尺寸规则引擎的 ``size_rule_results``；判定结果
+    仍以端面状态和 ``failure_reasons`` 为准，不由 Excel 表格重复判定。
+    """
 
     expected_count = max(0, int(result.expected_circle_count))
     if expected_count > MAX_FACE_COUNT:
@@ -163,8 +173,8 @@ def build_record_row(
             else None
         )
         face_counts.extend((
-            _class_valid_count(circle_result, "脏污"),
-            _class_valid_count(circle_result, "异物"),
+            _class_valid_count(circle_result, "污点"),
+            _class_valid_count(circle_result, "划痕"),
         ))
 
     expected_results = list(result.circle_results[:expected_count])
@@ -178,17 +188,12 @@ def build_record_row(
     recordable_results = [
         item for item in expected_results if _is_recordable_circle(item)
     ]
-    region_results = [
-        region
-        for circle in recordable_results
-        for region in list(circle.region_results or [])
-    ]
     total_count = (
-        sum(max(0, int(item.valid_instance_count)) for item in region_results)
+        sum(_circle_valid_count(item) for item in recordable_results)
         if recordable_results else None
     )
     total_area = (
-        sum(max(0.0, float(item.total_area_mm2)) for item in region_results)
+        sum(_circle_total_area_um2(item) for item in recordable_results)
         if recordable_results else None
     )
 
@@ -236,16 +241,55 @@ def _is_recordable_circle(circle_result) -> bool:
 
 
 def _class_valid_count(circle_result, class_name: str) -> int | None:
-    """空白表示端面无有效判定，0 才表示已判定且没有该类缺陷。"""
+    """返回新规则引擎确认的类别数量。
+
+    空白表示该端面没有完成正式判定，0 表示已判定且没有该类缺陷。
+    同一个实例只会命中一个尺寸段，因此对规则结果求和不会重复计数。
+    """
 
     if not _is_recordable_circle(circle_result):
         return None
     normalized_name = str(class_name).strip().casefold()
+    size_rule_results = list(circle_result.size_rule_results or [])
+    if size_rule_results:
+        return sum(
+            max(0, int(item.actual_instance_count))
+            for item in size_rule_results
+            if str(item.defect_class).strip().casefold() == normalized_name
+        )
+
+    # 允许对仅携带测量结果的中间快照生成记录；正式检测结果通常会同时
+    # 携带 size_rule_results。
     return sum(
-        max(0, int(item.valid_instance_count))
-        for item in list(circle_result.region_results or [])
+        1 for item in _valid_measurements(circle_result)
         if str(item.class_name).strip().casefold() == normalized_name
     )
+
+
+def _circle_valid_count(circle_result) -> int:
+    return sum(
+        _class_valid_count(circle_result, class_name) or 0
+        for class_name in ("污点", "划痕")
+    )
+
+
+def _circle_total_area_um2(circle_result) -> float:
+    """按每个实例的物理面积汇总，避免旧 mm² 区域字段混入新表。"""
+
+    return sum(
+        max(0.0, float(item.area_um2))
+        for item in _valid_measurements(circle_result)
+        if item.area_um2 is not None
+    )
+
+
+def _valid_measurements(circle_result) -> list[DefectMeasurement]:
+    return [
+        item for item in list(circle_result.measurements or [])
+        if isinstance(item, DefectMeasurement)
+        and str(item.class_name).strip() in {"污点", "划痕"}
+        and item.source != "invalid"
+    ]
 
 
 def _status_text(status) -> str:

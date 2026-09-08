@@ -85,6 +85,52 @@ class InspectionSizeRule:
 
 
 @dataclass
+class DefectMeasurement:
+    """一个分割实例的几何测量结果，所有物理尺寸单位均为 ``µm``。
+
+    该对象是对 ``SegmentationInstance`` 的只读派生结果，不修改模型原始
+    输出。``source`` 为 ``polygon`` 时表示来自有效分割轮廓；为
+    ``bbox_estimate`` 时表示轮廓无效、仅能用检测框估算，后续规则引擎
+    可以据此选择显示警告或拒绝参与正式判定。
+    """
+
+    instance_index: int = -1
+    class_id: int = -1
+    class_name: str = ""
+    center_x_px: Optional[float] = None
+    center_y_px: Optional[float] = None
+    area_px2: Optional[float] = None
+    area_um2: Optional[float] = None
+    equivalent_diameter_um: Optional[float] = None
+    rotated_length_um: Optional[float] = None
+    rotated_width_um: Optional[float] = None
+    source: str = "invalid"
+    estimated: bool = False
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SizeRuleInspectionResult:
+    """一条尺寸化工艺规则对应的统计与判定结果。"""
+
+    rule_id: str = ""
+    region_id: str = ""
+    region_name: str = ""
+    defect_class: str = ""
+    measurement: str = ""
+    min_size_um: float = 0.0
+    max_size_um: Optional[float] = None
+    min_inclusive: bool = True
+    max_inclusive: bool = True
+    max_instance_count: Optional[int] = None
+    actual_instance_count: int = 0
+    estimated_instance_count: int = 0
+    instance_indices: list[int] = field(default_factory=list)
+    passed: bool = True
+    failure_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
 class RegionInspectionResult:
     """一个圆环区域的统计与判定结果；class_id=-1 表示全部缺陷。"""
 
@@ -112,7 +158,11 @@ class InspectionResult:
     selected_circle_index: Optional[int] = None
     circle_confirmed: bool = False
     instances: list[SegmentationInstance] = field(default_factory=list)
+    measurements: list[DefectMeasurement] = field(default_factory=list)
     region_results: list[RegionInspectionResult] = field(default_factory=list)
+    size_rule_results: list[SizeRuleInspectionResult] = field(
+        default_factory=list
+    )
     failure_reasons: list[str] = field(default_factory=list)
     timings_ms: dict[str, float] = field(default_factory=dict)
 
@@ -179,7 +229,11 @@ class CircleInspectionResult:
     error: str = ""
     warnings: list[str] = field(default_factory=list)
     instances: list[SegmentationInstance] = field(default_factory=list)
+    measurements: list[DefectMeasurement] = field(default_factory=list)
     region_results: list[RegionInspectionResult] = field(default_factory=list)
+    size_rule_results: list[SizeRuleInspectionResult] = field(
+        default_factory=list
+    )
     failure_reasons: list[str] = field(default_factory=list)
     timings_ms: dict[str, float] = field(default_factory=dict)
 

@@ -90,6 +90,7 @@ def render_image_inspection_overlay(
             _draw_instances(
                 canvas,
                 getattr(circle_result, "instances", []) or [],
+                getattr(circle_result, "measurements", []) or [],
                 config,
                 line_width,
             )
@@ -123,17 +124,22 @@ def _draw_instance_contours(canvas, result, config, line_width: int):
     _draw_instances(
         canvas,
         getattr(result, "instances", []) or [],
+        getattr(result, "measurements", []) or [],
         config,
         line_width,
     )
 
 
-def _draw_instances(canvas, instances, config, line_width: int):
-    """画红色轮廓，并为每个有效实例添加类别和物理面积标签。"""
+def _draw_instances(canvas, instances, measurements, config, line_width: int):
+    """画红色轮廓，并添加污点直径或划痕宽度标签。"""
 
     height, width = canvas.shape[:2]
+    measurement_by_index = {
+        int(getattr(item, "instance_index", -1)): item
+        for item in measurements
+    }
     labels = []
-    for instance in instances:
+    for index, instance in enumerate(instances):
         points = _polygon_points(
             getattr(instance, "polygon", []),
             width,
@@ -151,7 +157,7 @@ def _draw_instances(canvas, instances, config, line_width: int):
             thickness=line_width,
             lineType=cv2.LINE_AA,
         )
-        labels.append((instance, points))
+        labels.append((instance, points, measurement_by_index.get(index)))
 
     _draw_instance_labels(canvas, labels, config, line_width)
 
@@ -186,8 +192,13 @@ def _draw_instance_labels(canvas, labels, config, line_width: int):
     padding = max(3, line_width + 1)
     gap = max(4, line_width * 2)
 
-    for instance, points in labels:
-        label = _instance_label(instance, points, um_per_pixel)
+    for instance, points, measurement in labels:
+        label = _instance_label(
+            instance,
+            points,
+            um_per_pixel,
+            measurement,
+        )
         if not label:
             continue
 
@@ -223,18 +234,32 @@ def _draw_instance_labels(canvas, labels, config, line_width: int):
     canvas[:, :] = cv2.cvtColor(np.asarray(pil_image), cv2.COLOR_RGB2BGR)
 
 
-def _instance_label(instance, points, um_per_pixel: float) -> str:
-    """由实例类别、像素面积和当前标定比例构造面向操作者的标签。"""
+def _instance_label(
+    instance,
+    points,
+    um_per_pixel: float,
+    measurement=None,
+) -> str:
+    """构造污点等效直径、划痕宽度或其他类别的面积标签。"""
 
     class_name = str(getattr(instance, "class_name", "") or "").strip()
     if not class_name:
         class_name = f"类别 {int(getattr(instance, 'class_id', -1))}"
 
+    if class_name == "污点" and measurement is not None:
+        diameter = getattr(measurement, "equivalent_diameter_um", None)
+        if diameter is not None and np.isfinite(float(diameter)):
+            return f"污点 {float(diameter):.2f}μm"
+    if class_name == "划痕" and measurement is not None:
+        width = getattr(measurement, "rotated_width_um", None)
+        if width is not None and np.isfinite(float(width)):
+            return f"划痕 宽{float(width):.2f}μm"
+
     pixel_area = float(getattr(instance, "pixel_area", 0) or 0)
     if not np.isfinite(pixel_area) or pixel_area <= 0:
         pixel_area = float(cv2.contourArea(points))
     area_um2 = max(0.0, pixel_area) * um_per_pixel * um_per_pixel
-    return f"{class_name} {area_um2:.2f}um²"
+    return f"{class_name} {area_um2:.2f}μm²"
 
 
 @lru_cache(maxsize=8)
@@ -343,13 +368,21 @@ def _draw_region_rings(canvas, circle, config, line_width: int):
         int(round(getattr(circle, "center_x", 0.0))),
         int(round(getattr(circle, "center_y", 0.0))),
     )
-    radii_mm = sorted({
-        float(getattr(rule, "outer_radius_mm", 0.0))
-        for rule in (getattr(config, "region_rules", []) or [])
-        if float(getattr(rule, "outer_radius_mm", 0.0)) > 0
-    })
-    for index, radius_mm in enumerate(radii_mm):
-        radius_px = int(round(radius_mm / mm_per_pixel))
+    size_rules = getattr(config, "size_rules", []) or []
+    if size_rules:
+        radii_um = sorted({
+            float(getattr(rule, "outer_radius_um", 0.0))
+            for rule in size_rules
+            if float(getattr(rule, "outer_radius_um", 0.0)) > 0
+        })
+    else:
+        radii_um = sorted({
+            float(getattr(rule, "outer_radius_mm", 0.0))
+            for rule in (getattr(config, "region_rules", []) or [])
+            if float(getattr(rule, "outer_radius_mm", 0.0)) > 0
+        })
+    for index, radius_um in enumerate(radii_um):
+        radius_px = int(round(radius_um / mm_per_pixel))
         if radius_px <= 0:
             continue
         cv2.circle(

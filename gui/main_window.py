@@ -13,7 +13,7 @@ from gui.app.widgets.log_panel import LogPanel
 from gui.app.widgets.inspection_panel import InspectionPanel
 from gui.app.services.config_service import ConfigService
 from backend.inspection_config import InspectionConfig, InspectionConfigStore
-from backend.inspection_engine import InspectionRuleEngine
+from backend.size_rule_inspection_engine import SizeRuleInspectionEngine
 from gui.app.services.controller import AppController
 from gui.app.services.ct_logger import CtLogger
 from gui.app.services.result_presenter import ResultPresenter
@@ -117,7 +117,7 @@ class MainWindow(QMainWindow):
             PROJECT_ROOT,
             parent=self,
         )
-        self.inspection_recheck_engine = InspectionRuleEngine()
+        self.inspection_recheck_engine = SizeRuleInspectionEngine()
         self.inspection_panel.set_inspection_config(self.inspection_config)
         self._inspection_current_task_id = ""
         self._inspection_current_image = None
@@ -827,8 +827,8 @@ class MainWindow(QMainWindow):
         try:
             result = self.inspection_recheck_engine.reevaluate(
                 confirmed_source,
-                mm_per_pixel=config.mm_per_pixel,
-                region_rules=config.region_rules,
+                um_per_pixel=config.mm_per_pixel,
+                size_rules=config.size_rules,
             )
         except (TypeError, ValueError) as error:
             self._log(f"[检测] 圆心确认复判失败: {error}")
@@ -878,8 +878,8 @@ class MainWindow(QMainWindow):
         try:
             result = self.inspection_recheck_engine.reevaluate(
                 source,
-                mm_per_pixel=config.mm_per_pixel,
-                region_rules=config.region_rules,
+                um_per_pixel=config.mm_per_pixel,
+                size_rules=config.size_rules,
             )
             result.timings_ms = copy.deepcopy(source.timings_ms)
             result.timings_ms["reevaluation"] = (

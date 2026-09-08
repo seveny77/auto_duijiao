@@ -265,8 +265,8 @@ class InspectionWorker(QObject):
                         circle_candidates=[candidate],
                         selected_circle_index=0,
                         circle_confirmed=circle_result.circle_confirmed,
-                        mm_per_pixel=config.mm_per_pixel,
-                        region_rules=config.region_rules,
+                        um_per_pixel=config.mm_per_pixel,
+                        size_rules=config.size_rules,
                         image_width=image_width,
                         image_height=image_height,
                     )
@@ -284,7 +284,11 @@ class InspectionWorker(QObject):
                 circle_result.error = evaluated.error
                 _extend_unique(circle_result.warnings, evaluated.warnings)
                 circle_result.instances = list(evaluated.instances)
+                circle_result.measurements = list(evaluated.measurements)
                 circle_result.region_results = list(evaluated.region_results)
+                circle_result.size_rule_results = list(
+                    evaluated.size_rule_results
+                )
                 circle_result.failure_reasons = list(
                     evaluated.failure_reasons
                 )
@@ -468,8 +472,18 @@ def _compatibility_result(
             if selected_result is not None
             else []
         ),
+        measurements=(
+            list(selected_result.measurements)
+            if selected_result is not None
+            else []
+        ),
         region_results=(
             list(selected_result.region_results)
+            if selected_result is not None
+            else []
+        ),
+        size_rule_results=(
+            list(selected_result.size_rule_results)
             if selected_result is not None
             else []
         ),
