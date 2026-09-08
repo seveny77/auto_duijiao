@@ -42,7 +42,7 @@ class CircleCandidate:
 class InspectionRegionRule:
     """一个圆环区域的卡控规则。
 
-    class_id=-1 表示区域统一规则：该区域内所有缺陷类别合并计数；
+    class_id=-1 表示新版区域统一规则：该区域内所有缺陷类别合并计数；
     非负 class_id 保留用于读取旧版按类别规则。
     """
 
@@ -55,6 +55,33 @@ class InspectionRegionRule:
     min_confidence: float = 0.0
     min_instance_area_mm2: float = 0.0
     max_instance_count: int = 0
+
+
+@dataclass
+class InspectionSizeRule:
+    """一条按缺陷类别、尺寸段和数量上限执行的工艺规则。
+
+    规则中的圆环半径、尺寸值均沿用当前检测界面的 ``µm`` 约定。
+    ``max_instance_count`` 为 ``None`` 时表示该尺寸段不限制数量；
+    为 ``0`` 时表示该尺寸段不允许出现任何有效缺陷。
+
+    ``min_size_um`` 始终是非负值。上界 ``max_size_um=None`` 表示无
+    上限。边界是否归属当前尺寸段由 ``min_inclusive`` / ``max_inclusive``
+    明确说明，避免 5、10、20、50 µm 等工艺边界出现歧义。
+    """
+
+    rule_id: str = ""
+    region_id: str = ""
+    region_name: str = ""
+    inner_radius_um: float = 0.0
+    outer_radius_um: float = 0.0
+    defect_class: str = ""
+    measurement: str = ""
+    min_size_um: float = 0.0
+    max_size_um: Optional[float] = None
+    min_inclusive: bool = True
+    max_inclusive: bool = True
+    max_instance_count: Optional[int] = None
 
 
 @dataclass

@@ -9,6 +9,7 @@ from typing import Any
 
 from backend.inspection_types import (
     InspectionRegionRule,
+    InspectionSizeRule,
     inspection_to_dict,
 )
 
@@ -22,6 +23,82 @@ class CircleDetectionConfig:
     # 候选检测框短边/长边的最低比例；0 表示不按长宽比过滤。
     min_box_aspect_ratio: float = 0.75
     expected_circle_count: int = 1
+
+
+def default_inspection_size_rules() -> list[InspectionSizeRule]:
+    """返回当前确认的 A/B/C/D 工艺默认规则。
+
+    本函数每次都会构造新对象，避免不同 ``InspectionConfig`` 共享可变
+    规则列表。这里仅描述工艺数据，实际尺寸测量与判定在后续步骤接入。
+    """
+
+    def rule(
+        rule_id: str,
+        region_id: str,
+        region_name: str,
+        inner_radius_um: float,
+        outer_radius_um: float,
+        defect_class: str,
+        measurement: str,
+        min_size_um: float,
+        max_size_um: float | None,
+        max_instance_count: int | None,
+        *,
+        min_inclusive: bool = True,
+        max_inclusive: bool = True,
+    ) -> InspectionSizeRule:
+        return InspectionSizeRule(
+            rule_id=rule_id,
+            region_id=region_id,
+            region_name=region_name,
+            inner_radius_um=inner_radius_um,
+            outer_radius_um=outer_radius_um,
+            defect_class=defect_class,
+            measurement=measurement,
+            min_size_um=min_size_um,
+            max_size_um=max_size_um,
+            min_inclusive=min_inclusive,
+            max_inclusive=max_inclusive,
+            max_instance_count=max_instance_count,
+        )
+
+    return [
+        # A：关键区，任何污点、划痕均不允许。
+        rule("A-spot-any", "A", "关键区", 0.0, 25.0,
+             "污点", "equivalent_diameter_um", 0.0, None, 0),
+        rule("A-scratch-any", "A", "关键区", 0.0, 25.0,
+             "划痕", "width_um", 0.0, None, 0),
+        # B：覆层区。小污点及窄划痕不限数量，边界归属按工艺要求固定。
+        rule("B-spot-small", "B", "覆层区", 25.0, 120.0,
+             "污点", "equivalent_diameter_um", 0.0, 5.0, None,
+             max_inclusive=False),
+        rule("B-spot-medium", "B", "覆层区", 25.0, 120.0,
+             "污点", "equivalent_diameter_um", 5.0, 10.0, 3),
+        rule("B-spot-large", "B", "覆层区", 25.0, 120.0,
+             "污点", "equivalent_diameter_um", 10.0, None, 0,
+             min_inclusive=False),
+        rule("B-scratch-narrow", "B", "覆层区", 25.0, 120.0,
+             "划痕", "width_um", 0.0, 3.0, None),
+        rule("B-scratch-wide", "B", "覆层区", 25.0, 120.0,
+             "划痕", "width_um", 3.0, None, 0,
+             min_inclusive=False),
+        # C：粘合区，只显示与记录，不参与合格判定。
+        rule("C-spot-any", "C", "粘合区", 120.0, 130.0,
+             "污点", "equivalent_diameter_um", 0.0, None, None),
+        rule("C-scratch-any", "C", "粘合区", 120.0, 130.0,
+             "划痕", "width_um", 0.0, None, None),
+        # D：接触区，划痕不控制；污点按 20 / 50 µm 分段。
+        rule("D-spot-small", "D", "接触区", 130.0, 250.0,
+             "污点", "equivalent_diameter_um", 0.0, 20.0, None,
+             max_inclusive=False),
+        rule("D-spot-medium", "D", "接触区", 130.0, 250.0,
+             "污点", "equivalent_diameter_um", 20.0, 50.0, 3),
+        rule("D-spot-large", "D", "接触区", 130.0, 250.0,
+             "污点", "equivalent_diameter_um", 50.0, None, 0,
+             min_inclusive=False),
+        rule("D-scratch-any", "D", "接触区", 130.0, 250.0,
+             "划痕", "width_um", 0.0, None, None),
+    ]
 
 
 @dataclass
@@ -43,6 +120,12 @@ class InspectionConfig:
         default_factory=CircleDetectionConfig
     )
     region_rules: list[InspectionRegionRule] = field(default_factory=list)
+    # v2 为“区域 × 缺陷类别 × 尺寸段”规则；旧 region_rules 仍保留，
+    # 直到后续规则引擎切换完成，避免影响当前生产检测流程。
+    rule_schema_version: int = 2
+    size_rules: list[InspectionSizeRule] = field(
+        default_factory=default_inspection_size_rules
+    )
     # 后续以每个检测圆的圆心为中心裁切正方形，各端面共用此边长。
     # 单位为原图像素；不随圆半径或 inference_imgsz 改变，也不附加边距。
     # 1024 是待通过裁切预览确认的初始值。本阶段只持久化，不启用裁切。
@@ -78,6 +161,7 @@ class InspectionConfig:
 
         errors.extend(_validate_circle_config(self.circle))
         errors.extend(_validate_region_rules(self.region_rules))
+        errors.extend(_validate_size_rules(self.size_rules))
         return errors
 
     def validate_evaluation(self) -> list[str]:
@@ -87,6 +171,7 @@ class InspectionConfig:
         if not math.isfinite(self.mm_per_pixel) or self.mm_per_pixel <= 0:
             errors.append("像素标定比例 mm_per_pixel 必须大于 0")
         errors.extend(_validate_region_rules(self.region_rules))
+        errors.extend(_validate_size_rules(self.size_rules))
         return errors
 
 
@@ -149,6 +234,7 @@ def inspection_config_from_dict(payload: dict[str, Any]) -> InspectionConfig:
     defaults = InspectionConfig()
     circle_payload = payload.get("circle", {})
     rules_payload = payload.get("region_rules", [])
+    size_rules_payload = payload.get("size_rules")
     roi_size_px = payload.get("roi_size_px", defaults.roi_size_px)
     roi_error = _roi_size_error(roi_size_px)
     if roi_error:
@@ -158,6 +244,8 @@ def inspection_config_from_dict(payload: dict[str, Any]) -> InspectionConfig:
         raise ValueError("circle 必须是 JSON 对象")
     if not isinstance(rules_payload, list):
         raise ValueError("region_rules 必须是 JSON 数组")
+    if size_rules_payload is not None and not isinstance(size_rules_payload, list):
+        raise ValueError("size_rules 必须是 JSON 数组")
 
     circle_defaults = CircleDetectionConfig()
     circle = CircleDetectionConfig(
@@ -185,6 +273,16 @@ def inspection_config_from_dict(payload: dict[str, Any]) -> InspectionConfig:
             raise ValueError(f"region_rules[{index}] 必须是 JSON 对象")
         rules.append(_region_rule_from_dict(item))
 
+    if size_rules_payload is None:
+        # 旧配置尚未携带新版工艺规则时，使用已确认的默认工艺表。
+        size_rules = default_inspection_size_rules()
+    else:
+        size_rules = []
+        for index, item in enumerate(size_rules_payload):
+            if not isinstance(item, dict):
+                raise ValueError(f"size_rules[{index}] 必须是 JSON 对象")
+            size_rules.append(_size_rule_from_dict(item))
+
     return InspectionConfig(
         enabled=bool(payload.get("enabled", defaults.enabled)),
         model_path=str(payload.get("model_path", defaults.model_path)),
@@ -210,6 +308,10 @@ def inspection_config_from_dict(payload: dict[str, Any]) -> InspectionConfig:
         )),
         circle=circle,
         region_rules=rules,
+        rule_schema_version=int(payload.get(
+            "rule_schema_version", defaults.rule_schema_version
+        )),
+        size_rules=size_rules,
         roi_size_px=roi_size_px,
     )
 
@@ -237,6 +339,31 @@ def _region_rule_from_dict(payload: dict[str, Any]) -> InspectionRegionRule:
             "min_instance_area_mm2", 0.0
         )),
         max_instance_count=int(payload.get("max_instance_count", 0)),
+    )
+
+
+def _size_rule_from_dict(payload: dict[str, Any]) -> InspectionSizeRule:
+    """从一条新版尺寸规则恢复类型化数据。"""
+
+    max_size_value = payload.get("max_size_um")
+    max_count_value = payload.get("max_instance_count")
+    return InspectionSizeRule(
+        rule_id=str(payload.get("rule_id", "")),
+        region_id=str(payload.get("region_id", "")),
+        region_name=str(payload.get("region_name", "")),
+        inner_radius_um=float(payload.get("inner_radius_um", 0.0)),
+        outer_radius_um=float(payload.get("outer_radius_um", 0.0)),
+        defect_class=str(payload.get("defect_class", "")),
+        measurement=str(payload.get("measurement", "")),
+        min_size_um=float(payload.get("min_size_um", 0.0)),
+        max_size_um=(
+            None if max_size_value is None else float(max_size_value)
+        ),
+        min_inclusive=bool(payload.get("min_inclusive", True)),
+        max_inclusive=bool(payload.get("max_inclusive", True)),
+        max_instance_count=(
+            None if max_count_value is None else int(max_count_value)
+        ),
     )
 
 
@@ -329,3 +456,148 @@ def _validate_region_rules(rules: list[InspectionRegionRule]) -> list[str]:
                 )
 
     return errors
+
+
+def _validate_size_rules(rules: list[InspectionSizeRule]) -> list[str]:
+    """检查新版尺寸规则的字段、圆环定义与尺寸段连续性。"""
+
+    errors: list[str] = []
+    seen_rule_ids: set[str] = set()
+    region_specs: dict[str, tuple[str, float, float]] = {}
+    buckets: dict[tuple[str, str, str], list[InspectionSizeRule]] = {}
+    allowed_measurement = {
+        "污点": "equivalent_diameter_um",
+        "划痕": "width_um",
+    }
+
+    for index, rule in enumerate(rules):
+        label = f"尺寸规则[{index}]"
+        if not rule.rule_id.strip():
+            errors.append(f"{label} rule_id 不能为空")
+        elif rule.rule_id in seen_rule_ids:
+            errors.append(f"尺寸规则 rule_id 重复: {rule.rule_id}")
+        seen_rule_ids.add(rule.rule_id)
+
+        if not rule.region_id.strip():
+            errors.append(f"{label} region_id 不能为空")
+        if not rule.region_name.strip():
+            errors.append(f"{label} region_name 不能为空")
+        if not math.isfinite(rule.inner_radius_um) or rule.inner_radius_um < 0:
+            errors.append(f"{label} 内半径必须是大于等于 0 的有效数字")
+        if (not math.isfinite(rule.outer_radius_um)
+                or rule.outer_radius_um <= rule.inner_radius_um):
+            errors.append(f"{label} 外半径必须大于内半径")
+
+        expected_measurement = allowed_measurement.get(rule.defect_class)
+        if expected_measurement is None:
+            errors.append(f"{label} 缺陷类别必须是污点或划痕")
+        elif rule.measurement != expected_measurement:
+            errors.append(
+                f"{label} 的 {rule.defect_class} 测量方式必须为"
+                f" {expected_measurement}"
+            )
+
+        if not math.isfinite(rule.min_size_um) or rule.min_size_um < 0:
+            errors.append(f"{label} 尺寸下限必须是大于等于 0 的有效数字")
+        if rule.max_size_um is not None:
+            if (not math.isfinite(rule.max_size_um)
+                    or rule.max_size_um < rule.min_size_um):
+                errors.append(f"{label} 尺寸上限必须大于等于下限")
+            elif (math.isclose(rule.max_size_um, rule.min_size_um)
+                  and not (rule.min_inclusive and rule.max_inclusive)):
+                errors.append(f"{label} 相同尺寸上下限必须同时包含边界")
+
+        if rule.max_instance_count is not None:
+            if (isinstance(rule.max_instance_count, bool)
+                    or not isinstance(rule.max_instance_count, int)
+                    or rule.max_instance_count < 0):
+                errors.append(f"{label} 数量上限必须是非负整数或 null")
+
+        spec = (
+            rule.region_name,
+            rule.inner_radius_um,
+            rule.outer_radius_um,
+        )
+        previous_spec = region_specs.get(rule.region_id)
+        if previous_spec is not None and previous_spec != spec:
+            errors.append(f"尺寸规则区域 {rule.region_id} 的名称或半径定义不一致")
+        else:
+            region_specs[rule.region_id] = spec
+
+        buckets.setdefault(
+            (rule.region_id, rule.defect_class, rule.measurement), []
+        ).append(rule)
+
+    _validate_size_rule_regions(region_specs, errors)
+    for key, bucket in buckets.items():
+        _validate_size_rule_bucket(key, bucket, errors)
+
+    return errors
+
+
+def _validate_size_rule_regions(
+    region_specs: dict[str, tuple[str, float, float]],
+    errors: list[str],
+) -> None:
+    """新版规则的 A/B/C/D 圆环必须从 0 开始且首尾连续。"""
+
+    ordered_regions = sorted(region_specs.items(), key=lambda item: item[1][1])
+    if not ordered_regions:
+        return
+
+    first_id, first_spec = ordered_regions[0]
+    if not math.isclose(first_spec[1], 0.0, abs_tol=1e-9):
+        errors.append(f"首个尺寸规则圆环 {first_id} 的内半径必须为 0")
+
+    for (previous_id, previous), (current_id, current) in zip(
+            ordered_regions,
+            ordered_regions[1:],
+    ):
+        if not math.isclose(previous[2], current[1], abs_tol=1e-9):
+            errors.append(
+                f"尺寸规则圆环 {previous_id} 与 {current_id} 之间存在空隙或重叠"
+            )
+
+
+def _validate_size_rule_bucket(
+    key: tuple[str, str, str],
+    rules: list[InspectionSizeRule],
+    errors: list[str],
+) -> None:
+    """确保每个区域/类别的尺寸段从 0 连续覆盖到无上限。"""
+
+    region_id, defect_class, _ = key
+    ordered = sorted(rules, key=lambda rule: rule.min_size_um)
+    if not ordered:
+        return
+
+    first = ordered[0]
+    if not math.isclose(first.min_size_um, 0.0, abs_tol=1e-9):
+        errors.append(
+            f"尺寸规则 {region_id}/{defect_class} 的首个尺寸段必须从 0 开始"
+        )
+        return
+
+    previous = first
+    for current in ordered[1:]:
+        if previous.max_size_um is None:
+            errors.append(
+                f"尺寸规则 {region_id}/{defect_class} 存在无上限段后的重复尺寸段"
+            )
+            break
+        if not math.isclose(previous.max_size_um, current.min_size_um,
+                              abs_tol=1e-9):
+            errors.append(
+                f"尺寸规则 {region_id}/{defect_class} 的尺寸段存在空隙或重叠"
+            )
+        elif previous.max_inclusive == current.min_inclusive:
+            errors.append(
+                f"尺寸规则 {region_id}/{defect_class} 在"
+                f" {current.min_size_um:g} µm 边界存在空隙或重叠"
+            )
+        previous = current
+
+    if previous.max_size_um is not None:
+        errors.append(
+            f"尺寸规则 {region_id}/{defect_class} 的最后一个尺寸段必须无上限"
+        )
